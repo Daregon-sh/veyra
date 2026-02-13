@@ -1,7 +1,9 @@
 // ==UserScript==
 // @name         Pet Links Dock
+// @namespace    https://github.com/
 // @version      1.7.3
-// @updateURL    https://raw.githubusercontent.com/Daregon-sh/veyra/refs/heads/main/Pet%20Links%20Dock-1.7.3.js
+// @downloadURL  https://raw.githubusercontent.com/Daregon-sh/veyra/refs/heads/main/
+// @updateURL    https://raw.githubusercontent.com/Daregon-sh/veyra/refs/heads/main/
 // @description  Draggable dock. Per-set local cache with in-modal management. Two linked pets layout-anchored extraction for main + links.
 // @match        https://demonicscans.org/*
 // @run-at       document-idle
