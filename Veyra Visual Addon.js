@@ -4918,7 +4918,7 @@ function escapeHtml(str) {
 
     const spanK = document.createElement('span');
     spanK.className = 'k';
-    spanK.textContent = 'dmg';
+    spanK.textContent = 'dmg dealt';
 
     const spanV = document.createElement('span');
     spanV.className = 'v';
