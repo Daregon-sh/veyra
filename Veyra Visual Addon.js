@@ -203,7 +203,7 @@ window.addEventListener('load', () => {
  #nav-order-panel {
     position: fixed;
     inset: 0;
-    z-index: 20000;
+    z-index: 200000;
     display: none;
     background: rgba(0,0,0,0.45);
   }
@@ -4106,32 +4106,32 @@ function initNavOrderUI({ onSave, onReset }) {
         font-size: 0.8em;
       }
       .res-fill {
-    position: absolute;
-    top: 0;
-    left: 0;
-    bottom: 0;
-    width: 0%;
-    border-radius: 999px;
-    transition: width .6s cubic-bezier(.2, .8, .2, 1);
-}
-.res-fill.mana {
-    background: linear-gradient(90deg, rgba(80, 200, 255, .25), rgba(80, 200, 255, .95));
-    box-shadow: 0 0 14px rgba(80, 200, 255, .35);
-}
-.res-fill.stamina {
-    background: linear-gradient(90deg, rgba(80, 255, 140, .25), rgba(80, 255, 140, .95));
-    box-shadow: 0 0 14px rgba(80, 255, 140, .35);
-}
-.res-bar {
-    position: relative;
-    flex: 1 1 auto;
-    height: 18px;
-    border-radius: 999px;
-    overflow: hidden;
-    background: linear-gradient(180deg, #22263a, #171929);
-    border: 1px solid #2b2d44;
-    box-shadow: inset 0 2px 6px rgba(0, 0, 0, .6), 0 4px 14px rgba(0, 0, 0, .45);
-}
+        position: absolute;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        width: 0%;
+        border-radius: 999px;
+        transition: width .6s cubic-bezier(.2, .8, .2, 1);
+      }
+      .res-fill.mana {
+        background: linear-gradient(90deg, rgba(80, 200, 255, .25), rgba(80, 200, 255, .95));
+        box-shadow: 0 0 14px rgba(80, 200, 255, .35);
+      }
+      .res-fill.stamina {
+        background: linear-gradient(90deg, rgba(80, 255, 140, .25), rgba(80, 255, 140, .95));
+        box-shadow: 0 0 14px rgba(80, 255, 140, .35);
+      }
+      .res-bar {
+        position: relative;
+        flex: 1 1 auto;
+        height: 18px;
+        border-radius: 999px;
+        overflow: hidden;
+        background: linear-gradient(180deg, #22263a, #171929);
+        border: 1px solid #2b2d44;
+        box-shadow: inset 0 2px 6px rgba(0, 0, 0, .6), 0 4px 14px rgba(0, 0, 0, .45);
+      }
     `;
         document.head.appendChild(style);
     }
@@ -4154,7 +4154,6 @@ function initNavOrderUI({ onSave, onReset }) {
         wrap.className = 'res-bar'; // native wrapper
 
         const inner = document.createElement('div');
-        // Use native inner class with specific type
         // The site snippet shows: <div class="res-fill stamina|mana" style="width: ...;"></div>
         inner.className = `res-fill ${kind === 'hp' ? 'stamina' : 'mana'}`;
         inner.style.width = `${Math.max(0, Math.min(100, percent))}%`;
@@ -4310,10 +4309,37 @@ function initNavOrderUI({ onSave, onReset }) {
         }
     }
 
+    /* STEP 3 (NEW): Bump space above container with the "⬅ Back" button
+  =============================== */
+    function adjustBackButtonSpacing(root = document) {
+        // Normalize function to compare text without excessive whitespace
+        const normalize = (s) => (s || '').replace(/\s+/g, ' ').trim();
+
+        const candidates = root.querySelectorAll('button, .btn, [role="button"]');
+
+        for (const el of candidates) {
+            const txt = normalize(el.textContent);
+            if (txt === '⬅ Back' || txt === '⬅ Back to wave') {
+                // Find the nearest wrapping div that contains this button
+                let hostDiv = el.closest('div');
+                if (!hostDiv) continue;
+
+                // Prevent repeatedly adding the margin
+                if (!hostDiv.dataset.backMtApplied) {
+                    hostDiv.style.marginTop = '20px';
+                    hostDiv.dataset.backMtApplied = '1';
+                }
+            }
+        }
+    }
+
     /* START
   =============================== */
     // Run once at load
-    syncHpToTopbar();
+    (async () => {
+        await syncHpToTopbar();
+        adjustBackButtonSpacing(document);
+    })();
 
     // Refresh after button-like actions
     if (!window.__hpSyncWired) {
@@ -4324,7 +4350,11 @@ function initNavOrderUI({ onSave, onReset }) {
         const scheduleRefresh = () => {
             setTimeout(() => {
                 try {
-                    const p = syncHpToTopbar();
+                    const p = (async () => {
+                        await syncHpToTopbar();
+                        // Re-apply spacing in case the DOM changed
+                        adjustBackButtonSpacing(document);
+                    })();
                     if (p && typeof p.catch === 'function') p.catch(() => {});
                 } catch (_) {}
             }, CLICK_REFRESH_DELAY);
@@ -4356,7 +4386,6 @@ function initNavOrderUI({ onSave, onReset }) {
         );
     }
 })();
-
 
 function isExceptionPage() {
     // Normalize URL for robust matching
@@ -4823,5 +4852,218 @@ function escapeHtml(str) {
     document.body.appendChild(btn);
 })();
 
+//dungeon mobs damage dealt
+
+
+(function () {
+  'use strict';
+
+  /** Utility: sleep */
+  const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+
+  /** Get instance_id from current URL (fallback to link if missing) */
+  function getInstanceIdFromPage() {
+    const url = new URL(window.location.href);
+    const iid = url.searchParams.get('instance_id');
+    return iid || '';
+  }
+
+  /** Fetch HTML text from URL using GM_xmlhttpRequest (with cookies); fallback to fetch */
+  function fetchHtml(url) {
+    return new Promise((resolve, reject) => {
+      if (typeof GM_xmlhttpRequest === 'function') {
+        GM_xmlhttpRequest({
+          method: 'GET',
+          url,
+          // By default Tampermonkey sends cookies for same-origin. Ensure not anonymous.
+          anonymous: false,
+          onload: (resp) => {
+            if (resp.status >= 200 && resp.status < 300) {
+              resolve(resp.responseText);
+            } else {
+              reject(new Error(`HTTP ${resp.status}: ${url}`));
+            }
+          },
+          onerror: (err) => reject(err),
+          ontimeout: () => reject(new Error(`Timeout: ${url}`)),
+        });
+      } else {
+        // Fallback
+        fetch(url, { credentials: 'include' })
+          .then((r) => (r.ok ? r.text() : Promise.reject(new Error(`HTTP ${r.status}: ${url}`))))
+          .then(resolve)
+          .catch(reject);
+      }
+    });
+  }
+
+  /** Parse damage from battle page HTML */
+  function parseDamageValue(htmlText) {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(htmlText, 'text/html');
+    const dmgEl = doc.querySelector('#yourDamageValue');
+    if (!dmgEl) return null;
+    return dmgEl.textContent.trim();
+  }
+
+  /** Create the stat pill node */
+  function createDamagePill(damageText) {
+    const pill = document.createElement('div');
+    pill.className = 'statpill';
+    pill.title = 'damage dealt';
+
+    const spanIcon = document.createElement('span');
+    spanIcon.className = 'icon';
+    spanIcon.textContent = '⚔️';
+
+    const spanK = document.createElement('span');
+    spanK.className = 'k';
+    spanK.textContent = 'dmg';
+
+    const spanV = document.createElement('span');
+    spanV.className = 'v';
+    spanV.textContent = damageText ?? '—';
+
+    pill.appendChild(spanIcon);
+    pill.appendChild(spanK);
+    pill.appendChild(spanV);
+    return pill;
+  }
+
+  /** Extract dgmid from a .mon element */
+  function getDgmidFromMon(monEl) {
+    // Prefer the checkbox (if present) since it's a clean number
+    const checkbox = monEl.querySelector('input.wave-addon-pick-monster[data-mid]');
+    if (checkbox && checkbox.dataset.mid) return checkbox.dataset.mid;
+
+    // Fallback: parse from Fight button link
+    const fightA = monEl.querySelector('a.btn.btn-danger.auto-button[href]');
+    if (fightA) {
+      try {
+        const u = new URL(fightA.href, window.location.origin);
+        const v = u.searchParams.get('dgmid');
+        if (v) return v;
+      } catch (_) {}
+      // If href is relative or encoded weirdly, try getAttribute raw and coerce
+      const raw = fightA.getAttribute('href') || '';
+      const match = raw.match(/[?&]dgmid=(\d+)/);
+      if (match) return match[1];
+    }
+    return null;
+  }
+
+  /** Extract instance_id from mon link if page param missing */
+  function getInstanceIdFromMon(monEl) {
+    const fightA = monEl.querySelector('a.btn.btn-danger.auto-button[href]');
+    if (fightA) {
+      try {
+        const u = new URL(fightA.href, window.location.origin);
+        const v = u.searchParams.get('instance_id');
+        if (v) return v;
+      } catch (_) {}
+      const raw = fightA.getAttribute('href') || '';
+      const match = raw.match(/[?&]instance_id=(\d+)/);
+      if (match) return match[1];
+    }
+    return null;
+  }
+
+  /** Ensure we only process each .mon once */
+  const processed = new WeakSet();
+
+  async function processMon(monEl, pageInstanceId) {
+    if (processed.has(monEl)) return;
+    processed.add(monEl);
+
+    const statRow = monEl.querySelector('.statrow');
+    if (!statRow) return; // nothing to append to
+
+    // Prevent duplicates if script reruns
+    const already = statRow.querySelector('.statpill[title="damage dealt"]');
+    if (already) return;
+
+    const dgmid = getDgmidFromMon(monEl);
+    if (!dgmid) {
+      // Append a placeholder pill if no dgmid found
+      statRow.appendChild(createDamagePill('—'));
+      return;
+    }
+
+    let instanceId = pageInstanceId || getInstanceIdFromMon(monEl) || '';
+    if (!instanceId) instanceId = getInstanceIdFromMon(monEl) || '';
+
+    // As a final fallback, try to read from current page again
+    if (!instanceId) instanceId = getInstanceIdFromPage() || '';
+
+    if (!instanceId) {
+      statRow.appendChild(createDamagePill('—'));
+      return;
+    }
+
+    const battleUrl = `https://demonicscans.org/battle.php?dgmid=${encodeURIComponent(dgmid)}&instance_id=${encodeURIComponent(instanceId)}`;
+
+    // Add an immediate placeholder to avoid layout shifts, then update
+    const pill = createDamagePill('…');
+    statRow.appendChild(pill);
+
+    try {
+      // Gentle pacing to avoid hammering
+      await sleep(80 + Math.random() * 120);
+
+      const html = await fetchHtml(battleUrl);
+      const dmg = parseDamageValue(html) || '—';
+
+      const vEl = pill.querySelector('.v');
+      if (vEl) vEl.textContent = dmg;
+    } catch (e) {
+      const vEl = pill.querySelector('.v');
+      if (vEl) vEl.textContent = '—';
+      // Optional: console.error(e);
+    }
+  }
+
+  async function processAll() {
+    const pageInstanceId = getInstanceIdFromPage();
+    const mons = Array.from(document.querySelectorAll('div.mon'));
+    // Sequential to keep it light on the server; you can parallelize if needed
+    for (const mon of mons) {
+      // eslint-disable-next-line no-await-in-loop
+      await processMon(mon, pageInstanceId);
+    }
+  }
+
+  function setupObserver() {
+    const root = document.body;
+    const mo = new MutationObserver((muts) => {
+      let found = false;
+      for (const m of muts) {
+        for (const n of m.addedNodes || []) {
+          if (!(n instanceof HTMLElement)) continue;
+          if (n.matches && n.matches('div.mon')) {
+            found = true;
+            processMon(n, getInstanceIdFromPage());
+          } else {
+            const mons = n.querySelectorAll ? n.querySelectorAll('div.mon') : [];
+            if (mons.length) {
+              found = true;
+              mons.forEach((el) => processMon(el, getInstanceIdFromPage()));
+            }
+          }
+        }
+      }
+      // If many nodes are added without direct .mon, a fallback can be used
+      if (!found) {
+        // no-op
+      }
+    });
+    mo.observe(root, { childList: true, subtree: true });
+  }
+
+  // Kickoff
+  (async () => {
+    await processAll();
+    setupObserver();
+  })();
+})();
 
 
