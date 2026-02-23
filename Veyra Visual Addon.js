@@ -5068,3 +5068,597 @@ function escapeHtml(str) {
 })();
 
 
+//dungeon loot/loot all
+(function () {
+  'use strict';
+
+  /* =========================================================
+     CONFIG — tweak selectors here if your markup changes
+     ========================================================= */
+  const SELECTORS = {
+    // Each monster row container
+    monsterRow: '.mon',
+
+    // Dead detection
+    deadClassOnRow: 'dead',     // <div class="mon dead">
+    deadPillSel: '.pill',       // also check any pill for text 'dead'
+
+    // Not-looted detection
+    notLootedPillSel: '.pill-warn',       // <span class="pill pill-warn">not looted</span>
+    anyPillSel: '.pill, .pill-warn',      // fallback: text contains "not looted"
+
+    // Pull IDs from "View/Fight" anchor
+    anchorToId: 'a.btn[href*="dgmid="], a[href*="dgmid="]',
+
+    // Per-row button placement (after the LAST <a class="btn"> within the row)
+    actionLinksSel: 'a.btn',
+
+    // Loot All button host (append as last child)
+    lootAllContainerQuery: '.panel .row'
+  };
+
+  // Pacing & batch size for Loot All
+  const AUTO_LOOT_DELAY_MS   = 90;
+  const LOOT_ALL_CONCURRENCY = 5;
+
+  /* =========================================================
+     Utility: Toast (brief notifications)
+     ========================================================= */
+  function toast(message, type = 'info') {
+    const box = document.createElement('div');
+    box.className = `tm-toast-${type}`;
+    box.style.cssText = `
+      position: fixed; top: 20px; right: 20px; z-index: 2147483647;
+      padding: 12px 16px; border-radius: 8px; color: #fff; font-size: 14px;
+      background: ${type === 'success' ? '#28a745' : type === 'error' ? '#dc3545' : '#17a2b8'};
+      box-shadow: 0 6px 20px rgba(0,0,0,.25);
+    `;
+    box.textContent = message;
+    document.body.appendChild(box);
+    setTimeout(() => box.remove(), 3000);
+  }
+
+  /* =========================================================
+     Parse helpers
+     ========================================================= */
+  function normalize(text) {
+    return (text || '').trim().toLowerCase();
+  }
+
+  function getInstanceId() {
+    // 1) From page URL
+    try {
+      const p = new URLSearchParams(location.search);
+      const iid = p.get('instance_id');
+      if (iid) return iid;
+    } catch {}
+    // 2) Fallback: from any link in the page
+    const a = document.querySelector('a.btn[href*="instance_id="], a[href*="instance_id="]');
+    if (a) {
+      const href = a.getAttribute('href') || '';
+      const m = href.match(/[?&]instance_id=(\d+)/);
+      if (m) return m[1];
+    }
+    return null;
+  }
+
+  function getInstanceIdFromRow(row) {
+    const a = row.querySelector('a.btn[href*="instance_id="], a[href*="instance_id="]');
+    if (!a) return null;
+    const href = a.getAttribute('href') || '';
+    const m = href.match(/[?&]instance_id=(\d+)/);
+    return m ? m[1] : null;
+  }
+
+  function getMonsterIdFromRow(row) {
+    const a = row.querySelector(SELECTORS.anchorToId);
+    if (!a) return null;
+    const href = a.getAttribute('href') || '';
+    const m = href.match(/[?&]dgmid=(\d+)/);
+    return m ? m[1] : null;
+  }
+
+  function isRowDead(row) {
+    if (row.classList.contains(SELECTORS.deadClassOnRow)) return true;
+    const pills = row.querySelectorAll(SELECTORS.deadPillSel);
+    return [...pills].some(p => /\bdead\b/i.test((p.textContent || '').trim()));
+  }
+
+  function isRowNotLooted(row) {
+    if (row.querySelector(SELECTORS.notLootedPillSel)) return true;
+    const pills = row.querySelectorAll(SELECTORS.anyPillSel);
+    return [...pills].some(p => /not\s*looted/i.test((p.textContent || '').trim()));
+  }
+
+  function isRowLootable(row) {
+    // Only show on DEAD + NOT LOOTED
+    return isRowDead(row) && isRowNotLooted(row);
+  }
+
+  /* =========================================================
+     Summary modal + items grid (reused for per-row & Loot All)
+     ========================================================= */
+  const ITEM_TIER_COLORS = {
+    COMMON: '#7f8c8d',
+    UNCOMMON: '#2ecc71',
+    RARE: '#9b59b6',
+    EPIC: '#e67e22',
+    LEGENDARY: '#f1c40f'
+  };
+  const DEFAULT_TIER_COLOR = '#ffffff';
+
+  const lootState = {
+    items: {},  // ITEM_ID -> { name, image, tier, count }
+    exp: 0,
+    gold: 0,
+    mobs: 0,
+    zeroMobs: 0,
+    failed: 0
+  };
+
+  function resetLootState() {
+    lootState.items = {};
+    lootState.exp   = 0;
+    lootState.gold  = 0;
+    lootState.mobs  = 0;
+    lootState.zeroMobs = 0;
+    lootState.failed   = 0;
+  }
+
+  function showLootModal(headerText) {
+    document.getElementById('vv-loot-modal')?.remove();
+    const modal = document.createElement('div');
+    modal.id = 'vv-loot-modal';
+    modal.style.cssText = `
+      position:fixed;inset:0;background:rgba(0,0,0,0.6);
+      z-index:100000;display:flex;align-items:center;justify-content:center;
+    `;
+    const box = document.createElement('div');
+    box.style.cssText = `
+      background:#2a2a3d;border-radius:12px;padding:20px;
+      max-width:92%;width:440px;text-align:center;color:white;
+      overflow-y:auto;overflow-x:hidden;max-height:82%;
+      box-shadow:0 10px 40px rgba(0,0,0,.45);
+      font-family:Arial,sans-serif;
+    `;
+    box.innerHTML = `
+      <h2 style="margin:0 0 12px 0;">${headerText || '🎁 Loot Gained'}</h2>
+      <div id="vv-loot-progress" style="font-size:12px;color:#c7c7d8;margin-bottom:10px;">
+        Initializing...
+      </div>
+      <div id="vv-loot-items" style="display:grid;grid-template-columns:repeat(auto-fill,96px);
+                  gap:12px;justify-content:center;"></div>
+      <div style="margin-top:10px;font-weight:bold;font-size:13px;line-height:1.5;">
+        🧟 Successful Mobs: <b id="vv-loot-mobs">0</b><br>
+        🧟 Zero EXP Mobs: <b id="vv-loot-zero">0</b><br>
+        ❌ Failed: <b id="vv-loot-failed">0</b><br>
+        💠 EXP: <span id="vv-loot-exp">0</span>
+        &nbsp;&nbsp;💰 Gold: <span id="vv-loot-gold">0</span>
+      </div>
+      <button id="vv-loot-close" class="btn"
+              style="margin-top:12px;padding:8px 14px;border-radius:8px;
+                     background-color:#444;color:white;border:none;
+                     cursor:pointer;font-weight:bold;">
+        Close
+      </button>
+    `;
+    modal.appendChild(box);
+    document.body.appendChild(modal);
+    document.getElementById('vv-loot-close').onclick = () => modal.remove();
+  }
+
+  function upsertItemSlot(itemsWrap, item) {
+    const itemId = String(item.ITEM_ID ?? '').trim();
+    if (!itemId) return;
+
+    const rec = lootState.items[itemId];
+    const currentCount = rec?.count ?? 0;
+    const color = ITEM_TIER_COLORS[item.TIER] || DEFAULT_TIER_COLOR;
+
+    let slot = itemsWrap.querySelector(`[data-item-id="${CSS.escape(itemId)}"]`);
+    if (!slot) {
+      slot = document.createElement('div');
+      slot.dataset.itemId = itemId;
+      slot.style.cssText = `
+        width:96px; display:flex; flex-direction:column;
+        align-items:center; text-align:center; box-sizing:border-box;
+      `;
+
+      const imgWrap = document.createElement('div');
+      imgWrap.style.cssText = 'position:relative;width:64px;height:64px;';
+
+      const img = document.createElement('img');
+      img.src = item.IMAGE_URL;
+      img.alt = item.NAME || '';
+      img.style.cssText = `
+        width:64px;height:64px;border-radius:4px;
+        border:2px solid ${color}; display:block;
+      `;
+
+      const badge = document.createElement('span');
+      badge.className = 'vv-item-count';
+      badge.textContent = `x${currentCount}`;
+      badge.style.cssText = `
+        position:absolute; right:-6px; bottom:-6px;
+        background:rgba(0,0,0,0.75); color:white; font-size:12px; font-weight:bold;
+        padding:1px 6px; border-radius:6px; line-height:1.2;
+      `;
+
+      imgWrap.appendChild(img);
+      imgWrap.appendChild(badge);
+
+      const textWrap = document.createElement('div');
+      textWrap.style.cssText = 'margin-top:6px;width:100%;line-height:1.1;';
+
+      const nameDiv = document.createElement('div');
+      nameDiv.textContent = item.NAME || 'Unknown';
+      nameDiv.style.cssText = `
+        font-size:13px;font-weight:bold;color:white;
+        overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+      `;
+
+      const tierDiv = document.createElement('div');
+      tierDiv.textContent = item.TIER || '';
+      tierDiv.style.cssText = `
+        font-size:10px;font-weight:bold;color:${color};margin-top:2px;
+      `;
+
+      textWrap.appendChild(nameDiv);
+      textWrap.appendChild(tierDiv);
+
+      slot.appendChild(imgWrap);
+      slot.appendChild(textWrap);
+
+      itemsWrap.appendChild(slot);
+      return;
+    }
+    const countEl = slot.querySelector('.vv-item-count');
+    if (countEl) countEl.textContent = `x${currentCount}`;
+
+    const img = slot.querySelector('img');
+    if (img) img.style.borderColor = color;
+  }
+
+  function parseExpFromRaw(raw) {
+    const m = String(raw || '').match(/([0-9][0-9,\.]*)\s*EXP/i);
+    return m ? Number(m[1].replace(/[^0-9]/g, '')) : 0;
+  }
+
+  /* =========================================================
+     Transports (Dungeon-first, then Legacy)
+     ========================================================= */
+  function isLootSuccess({ json, text }) {
+    if (json?.success === 'success' || json?.status === 'success') return true;
+    if (/looted|claimed|success/i.test(String(text || ''))) return true;
+    return false;
+  }
+  function isLootAlready({ json, text }) {
+    if (String(json?.status || '').toLowerCase() === 'already') return true;
+    if (/already\s+claimed/i.test(String(text || ''))) return true;
+    return false;
+  }
+
+  async function postDungeonLoot(dgmid, instanceId) {
+    try {
+      const body = `dgmid=${encodeURIComponent(dgmid)}&instance_id=${encodeURIComponent(instanceId)}`;
+      const res = await fetch('dungeon_loot.php', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest' },
+        body,
+        credentials: 'include',
+        referrer: location.href
+      });
+      const raw = await res.text();
+      let data = null; try { data = JSON.parse(raw); } catch {}
+      const ok = isLootSuccess({ json: data, text: raw });
+      const already = isLootAlready({ json: data, text: raw });
+      // rewards
+      const expGain = Number(data?.rewards?.exp || 0) || parseExpFromRaw(raw);
+      const goldGain = Number(data?.rewards?.gold || 0) || 0;
+      const items = Array.isArray(data?.items) ? data.items : [];
+      return { ok, already, expGain, goldGain, items, status: res.status, raw, data };
+    } catch (err) {
+      return { ok: false, already: false, expGain: 0, goldGain: 0, items: [], status: 0, raw: '', data: null };
+    }
+  }
+
+  async function postLegacyLoot(monsterId) {
+    try {
+      const body = `monster_id=${encodeURIComponent(monsterId)}`;
+      const res = await fetch('loot.php', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest' },
+        body,
+        credentials: 'include',
+        referrer: location.href
+      });
+      const raw = await res.text();
+      let data = null; try { data = JSON.parse(raw); } catch {}
+      const ok = isLootSuccess({ json: data, text: raw });
+      const already = isLootAlready({ json: data, text: raw });
+      const expGain = parseExpFromRaw(raw);
+      const goldGain = Number(data?.rewards?.gold || 0) || 0;
+      const items = Array.isArray(data?.items) ? data.items : [];
+      return { ok, already, expGain, goldGain, items, status: res.status, raw, data };
+    } catch (err) {
+      return { ok: false, already: false, expGain: 0, goldGain: 0, items: [], status: 0, raw: '', data: null };
+    }
+  }
+
+  /* =========================================================
+     Unified modal looter (uses dungeon first if instance_id is present)
+     ========================================================= */
+  async function lootMonsterIds(monsterIds, opts = {}) {
+    const {
+      concurrency = LOOT_ALL_CONCURRENCY,
+      perLootDelayMs = AUTO_LOOT_DELAY_MS,
+      instanceId = null,
+      header = '🎁 Loot Gained'
+    } = opts;
+
+    resetLootState();
+    showLootModal(header);
+
+    const mobsEl  = document.getElementById('vv-loot-mobs');
+    const zeroEl  = document.getElementById('vv-loot-zero');
+    const expEl   = document.getElementById('vv-loot-exp');
+    const goldEl  = document.getElementById('vv-loot-gold');
+    const failEl  = document.getElementById('vv-loot-failed');
+    const itemsEl = document.getElementById('vv-loot-items');
+    const progEl  = document.getElementById('vv-loot-progress');
+
+    const queue = monsterIds.map(String);
+    let totalAttempts = 0;
+
+    const updateProgress = () => {
+      if (!progEl) return;
+      progEl.textContent = `Looting... ${totalAttempts}/${monsterIds.length}`;
+    };
+
+    updateProgress();
+
+    const useDungeon = !!instanceId;
+
+    async function worker() {
+      while (queue.length) {
+        const id = queue.shift();
+        if (!id) return;
+
+        totalAttempts++;
+        updateProgress();
+
+        const r = useDungeon ? await postDungeonLoot(id, instanceId) : await postLegacyLoot(id);
+
+        if (!(r.ok || r.already)) {
+          lootState.failed++;
+          if (failEl) failEl.textContent = lootState.failed.toLocaleString();
+          await new Promise(res => setTimeout(res, perLootDelayMs));
+          continue;
+        }
+
+        if (r.expGain > 0) {
+          lootState.mobs++;
+          lootState.exp += r.expGain;
+          if (mobsEl) mobsEl.textContent = lootState.mobs.toLocaleString();
+          if (expEl)  expEl.textContent  = lootState.exp.toLocaleString();
+        } else {
+          lootState.zeroMobs++;
+          if (zeroEl) zeroEl.textContent = lootState.zeroMobs.toLocaleString();
+        }
+
+        if (r.goldGain > 0) {
+          lootState.gold += r.goldGain;
+          if (goldEl) goldEl.textContent = lootState.gold.toLocaleString();
+        }
+
+        if (Array.isArray(r.items)) {
+          for (const item of r.items) {
+            const key = String(item.ITEM_ID ?? '').trim();
+            if (key) {
+              if (!lootState.items[key]) {
+                lootState.items[key] = {
+                  name: item.NAME, image: item.IMAGE_URL, tier: item.TIER, count: 0
+                };
+              }
+              lootState.items[key].count += 1;
+            }
+            if (itemsEl) upsertItemSlot(itemsEl, item);
+          }
+        }
+
+        await new Promise(res => setTimeout(res, perLootDelayMs));
+      }
+    }
+
+    const workers = Array.from({ length: Math.max(1, concurrency) }, () => worker());
+    await Promise.all(workers);
+
+    if (progEl) progEl.textContent = 'Done.';
+    return { ...lootState };
+  }
+
+  /* =========================================================
+     Per-row UI placement & behavior
+     ========================================================= */
+  function placeAfterLastActionLink(row, btnEl) {
+    const links = row.querySelectorAll(SELECTORS.actionLinksSel);
+    if (links.length) {
+      const last = links[links.length - 1];
+      btnEl.style.marginLeft = '8px';
+      last.insertAdjacentElement('afterend', btnEl);
+      return true;
+    }
+    return false;
+  }
+
+  function markRowAsLooted(row) {
+    // Change pill “not looted” -> “looted”
+    const pills = row.querySelectorAll('.pill, .pill-warn');
+    for (const p of pills) {
+      const t = normalize(p.textContent);
+      if (/not\s*looted/.test(t)) {
+        p.textContent = 'looted';
+        p.classList.remove('pill-warn');
+      }
+    }
+    // Replace a Loot button (if present) with a passive pill
+    const lootBtn = row.querySelector('.tm-loot-btn');
+    if (lootBtn) {
+      const done = document.createElement('span');
+      done.className = 'pill';
+      done.textContent = '💰 Looted';
+      lootBtn.replaceWith(done);
+    }
+  }
+
+ function createLootButtonForRow(row) {
+    if (!isRowLootable(row)) return null;
+
+    const monsterId = getMonsterIdFromRow(row);
+    if (!monsterId) return null;
+
+    // Avoid duplicates
+    if (row.querySelector('.tm-loot-btn')) return null;
+
+    // Use <a class="btn"> to match native styling
+    const btn = document.createElement('a');
+    btn.href = "#";
+    btn.className = "btn tm-loot-btn";   // inherits all native styles
+    btn.textContent = "💰 Loot";
+
+    // Match native spacing with proper margin
+    btn.style.marginLeft = "6px";
+
+    btn.addEventListener("click", async (e) => {
+        e.preventDefault();
+        btn.style.pointerEvents = "none";
+        const iid = getInstanceIdFromRow(row) || getInstanceId() || null;
+
+        try {
+            await lootMonsterIds([monsterId], {
+                concurrency: 1,
+                perLootDelayMs: 0,
+                instanceId: iid,
+                header: "🎁 Loot Result"
+            });
+            markRowAsLooted(row);
+        } catch (err) {
+            console.error(err);
+            toast("Per-row loot failed. See console.", "error");
+        } finally {
+            // We do NOT re-enable pointerEvents because button gets replaced with pill
+            setTimeout(updateLootAllVisibility, 120);
+        }
+    });
+
+    // Insert after last <a.btn>
+    const placed = placeAfterLastActionLink(row, btn);
+    if (!placed) row.appendChild(btn);
+
+    return btn;
+}
+  function addLootButtonsToAllRows() {
+    document.querySelectorAll(SELECTORS.monsterRow).forEach(row => createLootButtonForRow(row));
+    updateLootAllVisibility();
+  }
+
+  /* =========================================================
+     Loot All button behavior (append to first .panel .row)
+     ========================================================= */
+  let lootAllBtn = null;
+
+  function ensureLootAllButton() {
+    if (lootAllBtn && lootAllBtn.isConnected) return lootAllBtn;
+
+    const container = document.querySelector(SELECTORS.lootAllContainerQuery);
+    if (!container) return null;
+
+    lootAllBtn = document.createElement('button');
+    lootAllBtn.id = 'tm-loot-all-btn';
+    lootAllBtn.textContent = '💰 Loot All';
+    lootAllBtn.style.cssText = `
+      display:none; /* toggled by updateLootAllVisibility */
+      margin-left: 8px;
+      padding:8px 12px;border:0;border-radius:10px;cursor:pointer;
+      background:rgb(40 65 200);color:#fff;font:700 13px/1.2 system-ui;
+      box-shadow:0 6px 16px rgba(0,0,0,.25);
+      align-self:center;
+    `;
+    lootAllBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      lootAllBtn.disabled = true;
+      try {
+        // Gather all current lootable rows (or simply read IDs from buttons)
+        const rows = [...document.querySelectorAll(SELECTORS.monsterRow)];
+        const eligible = rows.filter(isRowLootable).map(r => ({ r, id: getMonsterIdFromRow(r) })).filter(x => !!x.id);
+
+        if (!eligible.length) {
+          toast('No dead & not-looted monsters found.', 'info');
+          updateLootAllVisibility();
+          return;
+        }
+
+        const ids = eligible.map(x => x.id);
+        const iid = getInstanceId() || null;
+
+        await lootMonsterIds(ids, {
+          concurrency: LOOT_ALL_CONCURRENCY,
+          perLootDelayMs: AUTO_LOOT_DELAY_MS,
+          instanceId: iid,
+          header: '⚔️ Loot All'
+        });
+
+        // Mark rows as looted
+        for (const { r } of eligible) markRowAsLooted(r);
+      } catch (e2) {
+        console.error(e2);
+        toast('Batch loot failed. See console.', 'error');
+      } finally {
+        lootAllBtn.disabled = false;
+        setTimeout(updateLootAllVisibility, 150);
+      }
+    });
+
+    container.appendChild(lootAllBtn); // append as last child
+    return lootAllBtn;
+  }
+
+  function updateLootAllVisibility() {
+    const btn = ensureLootAllButton();
+    if (!btn) return;
+    // Show if at least one per-row loot button exists
+    const anyLootBtn = !!document.querySelector('.tm-loot-btn');
+    btn.style.display = anyLootBtn ? 'inline-flex' : 'none';
+  }
+
+  /* =========================================================
+     Observe & init
+     ========================================================= */
+  let debounceTimer = null;
+  function observeForNewRows() {
+    const obs = new MutationObserver(() => {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        addLootButtonsToAllRows();
+        updateLootAllVisibility();
+      }, 120);
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
+  }
+
+  function init() {
+    if (!/^\/guild_dungeon_location\.php/i.test(location.pathname)) return;
+
+    addLootButtonsToAllRows();
+    ensureLootAllButton();
+    updateLootAllVisibility();
+    observeForNewRows();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
+
