@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Veyra Visual Addon
 // @namespace    https://github.com/Daregon-sh/veyra
-// @version      1.7.2
+// @version      1.7.3
 // @downloadURL  https://raw.githubusercontent.com/Daregon-sh/veyra/refs/heads/codes/Veyra%20Visual%20Addon.js
 // @updateURL    https://raw.githubusercontent.com/Daregon-sh/veyra/refs/heads/codes/Veyra%20Visual%20Addon.js
 // @description  sidebars visual integration
@@ -4858,7 +4858,7 @@ function escapeHtml(str) {
 
   /** ---------- Config ---------- */
   const CONCURRENCY = 6;        // max parallel requests
-  const CACHE_TTL_MS = 3 * 60 * 1000; // 3 minutes
+  const CACHE_TTL_MS = 0; 		// cache life
   const MIN_JITTER = 40;        // ms
   const MAX_JITTER = 140;       // ms
 
