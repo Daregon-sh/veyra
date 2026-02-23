@@ -180,9 +180,7 @@
         pointer-events: none;
         z-index: 0;
       }
-      /* Keep normal content above overlay */
-      body, body * { position: relative; z-index: 1; }
-    `;
+     `;
     const style = document.createElement('style');
     style.id = 'loc-banner-style';
     style.textContent = css;
