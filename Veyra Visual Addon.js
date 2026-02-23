@@ -4853,220 +4853,274 @@ function escapeHtml(str) {
 })();
 
 //dungeon mobs damage dealt
-
-
 (function () {
   'use strict';
 
-  /** Utility: sleep */
-  const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+  /** ---------- Config ---------- */
+  const CONCURRENCY = 6;        // max parallel requests
+  const CACHE_TTL_MS = 3 * 60 * 1000; // 3 minutes
+  const MIN_JITTER = 40;        // ms
+  const MAX_JITTER = 140;       // ms
 
-  /** Get instance_id from current URL (fallback to link if missing) */
+  /** ---------- Utils ---------- */
+  const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+  const jitter = () => MIN_JITTER + Math.random() * (MAX_JITTER - MIN_JITTER);
+
   function getInstanceIdFromPage() {
-    const url = new URL(window.location.href);
-    const iid = url.searchParams.get('instance_id');
-    return iid || '';
+    try {
+      return new URL(location.href).searchParams.get('instance_id') || '';
+    } catch { return ''; }
   }
 
-  /** Fetch HTML text from URL using GM_xmlhttpRequest (with cookies); fallback to fetch */
+  function safeUrlParam(href, key) {
+    try { return new URL(href, location.origin).searchParams.get(key); }
+    catch { return null; }
+  }
+
   function fetchHtml(url) {
     return new Promise((resolve, reject) => {
       if (typeof GM_xmlhttpRequest === 'function') {
         GM_xmlhttpRequest({
           method: 'GET',
           url,
-          // By default Tampermonkey sends cookies for same-origin. Ensure not anonymous.
           anonymous: false,
           onload: (resp) => {
-            if (resp.status >= 200 && resp.status < 300) {
-              resolve(resp.responseText);
-            } else {
-              reject(new Error(`HTTP ${resp.status}: ${url}`));
-            }
+            if (resp.status >= 200 && resp.status < 300) resolve(resp.responseText);
+            else reject(new Error(`HTTP ${resp.status}`));
           },
-          onerror: (err) => reject(err),
-          ontimeout: () => reject(new Error(`Timeout: ${url}`)),
+          onerror: reject,
+          ontimeout: () => reject(new Error('Timeout')),
         });
       } else {
-        // Fallback
         fetch(url, { credentials: 'include' })
-          .then((r) => (r.ok ? r.text() : Promise.reject(new Error(`HTTP ${r.status}: ${url}`))))
-          .then(resolve)
-          .catch(reject);
+          .then(r => (r.ok ? r.text() : Promise.reject(new Error(`HTTP ${r.status}`))))
+          .then(resolve, reject);
       }
     });
   }
 
-  /** Parse damage from battle page HTML */
-  function parseDamageValue(htmlText) {
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(htmlText, 'text/html');
-    const dmgEl = doc.querySelector('#yourDamageValue');
-    if (!dmgEl) return null;
-    return dmgEl.textContent.trim();
+  function parseDamageFromBattleHTML(html) {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const el = doc.querySelector('#yourDamageValue');
+    return el ? el.textContent.trim() : null;
   }
 
-  /** Create the stat pill node */
-  function createDamagePill(damageText) {
+  function createDamagePill(initialText) {
     const pill = document.createElement('div');
     pill.className = 'statpill';
-    pill.title = 'damage dealt';
+    pill.title = 'Damage dealt';
+    // Minimal inline style to look okay anywhere
+    pill.style.cssText = 'display:inline-flex;gap:6px;align-items:center;margin-left:6px;';
 
-    const spanIcon = document.createElement('span');
-    spanIcon.className = 'icon';
-    spanIcon.textContent = '⚔️';
+    const icon = document.createElement('span');
+    icon.textContent = '⚔️';
 
-    const spanK = document.createElement('span');
-    spanK.className = 'k';
-    spanK.textContent = 'dmg dealt';
+    const k = document.createElement('span');
+    k.className = 'k';
+    k.style.opacity = '0.75';
+    k.textContent = 'dmg';
 
-    const spanV = document.createElement('span');
-    spanV.className = 'v';
-    spanV.textContent = damageText ?? '—';
+    const v = document.createElement('span');
+    v.className = 'v';
+    v.textContent = initialText;
 
-    pill.appendChild(spanIcon);
-    pill.appendChild(spanK);
-    pill.appendChild(spanV);
+    pill.append(icon, k, v);
     return pill;
   }
 
-  /** Extract dgmid from a .mon element */
-  function getDgmidFromMon(monEl) {
-    // Prefer the checkbox (if present) since it's a clean number
-    const checkbox = monEl.querySelector('input.wave-addon-pick-monster[data-mid]');
-    if (checkbox && checkbox.dataset.mid) return checkbox.dataset.mid;
+  function extractDgmidFromMon(monEl) {
+    // Prefer clean checkbox
+    const ck = monEl.querySelector('input.wave-addon-pick-monster[data-mid]');
+    if (ck?.dataset?.mid) return ck.dataset.mid;
 
-    // Fallback: parse from Fight button link
-    const fightA = monEl.querySelector('a.btn.btn-danger.auto-button[href]');
-	if (!fightA){  const fightA = monEl.querySelector('a.btn[href]');}
-    if (fightA) {
-      try {
-        const u = new URL(fightA.href, window.location.origin);
-        const v = u.searchParams.get('dgmid');
-        if (v) return v;
-      } catch (_) {}
-      // If href is relative or encoded weirdly, try getAttribute raw and coerce
-      const raw = fightA.getAttribute('href') || '';
-      const match = raw.match(/[?&]dgmid=(\d+)/);
-      if (match) return match[1];
+    // Fallback: any link that has dgmid
+    const a = monEl.querySelector('a[href*="dgmid="]');
+    if (a) {
+      const val = safeUrlParam(a.href, 'dgmid');
+      if (val) return val;
+      const raw = a.getAttribute('href') || '';
+      const m = raw.match(/[?&]dgmid=(\d+)/);
+      if (m) return m[1];
     }
     return null;
   }
 
-  /** Extract instance_id from mon link if page param missing */
-  function getInstanceIdFromMon(monEl) {
-    const fightA = monEl.querySelector('a.btn.btn-danger.auto-button[href]');
-    if (fightA) {
-      try {
-        const u = new URL(fightA.href, window.location.origin);
-        const v = u.searchParams.get('instance_id');
-        if (v) return v;
-      } catch (_) {}
-      const raw = fightA.getAttribute('href') || '';
-      const match = raw.match(/[?&]instance_id=(\d+)/);
-      if (match) return match[1];
+  function extractInstanceIdFromMon(monEl) {
+    const a = monEl.querySelector('a[href*="instance_id="]');
+    if (a) {
+      const val = safeUrlParam(a.href, 'instance_id');
+      if (val) return val;
+      const raw = a.getAttribute('href') || '';
+      const m = raw.match(/[?&]instance_id=(\d+)/);
+      if (m) return m[1];
     }
     return null;
   }
 
-  /** Ensure we only process each .mon once */
+  /** ---------- Cache (sessionStorage + in-memory) ---------- */
+  const memCache = new Map(); // key -> { val, ts }
+
+  function cacheKey(dgmid, instanceId) {
+    return `dmg:${dgmid}:${instanceId}`;
+  }
+
+  function cacheGet(dgmid, instanceId) {
+    const key = cacheKey(dgmid, instanceId);
+    const now = Date.now();
+
+    // in-memory
+    const mem = memCache.get(key);
+    if (mem && now - mem.ts < CACHE_TTL_MS) return mem.val;
+
+    // sessionStorage
+    try {
+      const raw = sessionStorage.getItem(key);
+      if (raw) {
+        const obj = JSON.parse(raw);
+        if (now - obj.ts < CACHE_TTL_MS) {
+          memCache.set(key, obj);
+          return obj.val;
+        }
+      }
+    } catch {}
+    return null;
+  }
+
+  function cacheSet(dgmid, instanceId, val) {
+    const key = cacheKey(dgmid, instanceId);
+    const entry = { val, ts: Date.now() };
+    memCache.set(key, entry);
+    try {
+      sessionStorage.setItem(key, JSON.stringify(entry));
+    } catch {}
+  }
+
+  /** ---------- Request de-duplication ---------- */
+  const inFlight = new Map(); // url -> Promise<string>
+
+  function fetchBattlePageOnce(url) {
+    if (inFlight.has(url)) return inFlight.get(url);
+    const p = fetchHtml(url)
+      .finally(() => inFlight.delete(url));
+    inFlight.set(url, p);
+    return p;
+  }
+
+  /** ---------- Concurrency pool ---------- */
+  async function runWithLimit(items, limit, worker) {
+    const results = new Array(items.length);
+    let i = 0;
+    const runners = new Array(Math.min(limit, items.length)).fill(0).map(async () => {
+      while (i < items.length) {
+        const idx = i++;
+        try {
+          results[idx] = await worker(items[idx], idx);
+        } catch (e) {
+          results[idx] = e;
+        }
+      }
+    });
+    await Promise.all(runners);
+    return results;
+  }
+
+  /** ---------- Main per-card processing ---------- */
   const processed = new WeakSet();
 
-  async function processMon(monEl, pageInstanceId) {
-    if (processed.has(monEl)) return;
-    processed.add(monEl);
+  function ensureDamagePill(monEl, initial = '…') {
+    let pill = monEl.querySelector('.statrow .statpill[title="Damage dealt"]');
+    if (pill) return pill;
 
-    const statRow = monEl.querySelector('.statrow');
-    if (!statRow) return; // nothing to append to
+    const row = monEl.querySelector('.statrow');
+    if (!row) return null;
 
-    // Prevent duplicates if script reruns
-    const already = statRow.querySelector('.statpill[title="damage dealt"]');
-    if (already) return;
+    pill = createDamagePill(initial);
+    row.appendChild(pill);
+    return pill;
+  }
 
-    const dgmid = getDgmidFromMon(monEl);
-    if (!dgmid) {
-      // Append a placeholder pill if no dgmid found
-      statRow.appendChild(createDamagePill('—'));
+  function buildBattleUrl(dgmid, instanceId) {
+    return `https://demonicscans.org/battle.php?dgmid=${encodeURIComponent(dgmid)}&instance_id=${encodeURIComponent(instanceId)}`;
+  }
+
+  function collectMonsters() {
+    const pageInstanceId = getInstanceIdFromPage();
+    const mons = Array.from(document.querySelectorAll('div.mon'));
+    const jobs = [];
+
+    for (const monEl of mons) {
+      if (processed.has(monEl)) continue;
+      processed.add(monEl);
+
+      const statRow = monEl.querySelector('.statrow');
+      if (!statRow) continue;
+
+      const dgmid = extractDgmidFromMon(monEl);
+      const instanceId = pageInstanceId || extractInstanceIdFromMon(monEl) || '';
+
+      const pill = ensureDamagePill(monEl, dgmid && instanceId ? '…' : '—');
+
+      if (!dgmid || !instanceId || !pill) continue;
+
+      jobs.push({
+        monEl, pill, dgmid, instanceId,
+        url: buildBattleUrl(dgmid, instanceId)
+      });
+    }
+    return jobs;
+  }
+
+  async function processJob(job) {
+    const { pill, dgmid, instanceId, url } = job;
+
+    // Cache hit?
+    const cached = cacheGet(dgmid, instanceId);
+    if (cached) {
+      const v = pill.querySelector('.v');
+      if (v) v.textContent = cached;
       return;
     }
 
-    let instanceId = pageInstanceId || getInstanceIdFromMon(monEl) || '';
-    if (!instanceId) instanceId = getInstanceIdFromMon(monEl) || '';
-
-    // As a final fallback, try to read from current page again
-    if (!instanceId) instanceId = getInstanceIdFromPage() || '';
-
-    if (!instanceId) {
-      statRow.appendChild(createDamagePill('—'));
-      return;
-    }
-
-    const battleUrl = `https://demonicscans.org/battle.php?dgmid=${encodeURIComponent(dgmid)}&instance_id=${encodeURIComponent(instanceId)}`;
-
-    // Add an immediate placeholder to avoid layout shifts, then update
-    const pill = createDamagePill('…');
-    statRow.appendChild(pill);
+    // Small randomized jitter so we don't hammer in a perfect burst
+    await sleep(jitter());
 
     try {
-      // Gentle pacing to avoid hammering
-      await sleep(80 + Math.random() * 120);
-
-      const html = await fetchHtml(battleUrl);
-      const dmg = parseDamageValue(html) || '—';
-
-      const vEl = pill.querySelector('.v');
-      if (vEl) vEl.textContent = dmg;
-    } catch (e) {
-      const vEl = pill.querySelector('.v');
-      if (vEl) vEl.textContent = '—';
-      // Optional: console.error(e);
+      const html = await fetchBattlePageOnce(url);
+      const dmg = parseDamageFromBattleHTML(html) || '—';
+      cacheSet(dgmid, instanceId, dmg);
+      const v = pill.querySelector('.v');
+      if (v) v.textContent = dmg;
+    } catch {
+      const v = pill.querySelector('.v');
+      if (v) v.textContent = '—';
+      // soft backoff: avoid immediate retries; cache negative for a short time
+      cacheSet(dgmid, instanceId, '—');
     }
   }
 
-  async function processAll() {
-    const pageInstanceId = getInstanceIdFromPage();
-    const mons = Array.from(document.querySelectorAll('div.mon'));
-    // Sequential to keep it light on the server; you can parallelize if needed
-    for (const mon of mons) {
-      // eslint-disable-next-line no-await-in-loop
-      await processMon(mon, pageInstanceId);
-    }
+  async function processAllParallel() {
+    const jobs = collectMonsters();
+    if (jobs.length === 0) return;
+
+    await runWithLimit(jobs, CONCURRENCY, processJob);
   }
 
   function setupObserver() {
-    const root = document.body;
-    const mo = new MutationObserver((muts) => {
-      let found = false;
-      for (const m of muts) {
-        for (const n of m.addedNodes || []) {
-          if (!(n instanceof HTMLElement)) continue;
-          if (n.matches && n.matches('div.mon')) {
-            found = true;
-            processMon(n, getInstanceIdFromPage());
-          } else {
-            const mons = n.querySelectorAll ? n.querySelectorAll('div.mon') : [];
-            if (mons.length) {
-              found = true;
-              mons.forEach((el) => processMon(el, getInstanceIdFromPage()));
-            }
-          }
-        }
-      }
-      // If many nodes are added without direct .mon, a fallback can be used
-      if (!found) {
-        // no-op
-      }
+    const obs = new MutationObserver(() => {
+      // Gather only new, unprocessed monsters and schedule them
+      const jobs = collectMonsters();
+      if (jobs.length === 0) return;
+      runWithLimit(jobs, CONCURRENCY, processJob).catch(() => {});
     });
-    mo.observe(root, { childList: true, subtree: true });
+    obs.observe(document.body, { childList: true, subtree: true });
   }
 
-  // Kickoff
   (async () => {
-    await processAll();
+    await processAllParallel();
     setupObserver();
   })();
-})();
 
+})();
 
 //dungeon loot/loot all
 (function () {
