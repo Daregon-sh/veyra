@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pet Links Dock
 // @namespace    https://github.com/Daregon-sh/veyra
-// @version      1.8.1
+// @version      1.9.1
 // @downloadURL  https://raw.githubusercontent.com/Daregon-sh/veyra/refs/heads/codes/Pet%20Links%20Dock.js
 // @updateURL    https://raw.githubusercontent.com/Daregon-sh/veyra/refs/heads/codes/Pet%20Links%20Dock.js
 // @description  Draggable dock. Per-set local cache with in-modal management. Linked pets extraction + stat contributions + background refresh. Works from multiple pages, fetches from /pets.php. Closes /pets.php when done.
@@ -1129,6 +1129,9 @@
         box-shadow: 0 6px 16px rgba(0,0,0,.35);
         background: #0f1120;
       }
+
+
+
     `;
     document.head.appendChild(style);
   }
@@ -1441,4 +1444,215 @@
 
     renderPetDetailsModal(petId, pair, invMaps);
   }
+
+(async function () {
+
+    // Only run on stats.php
+    const IS_STATS_PAGE =
+        location.pathname.toLowerCase().includes('/stats.php') ||
+        /[?&#]page=stats\b/i.test(location.search);
+
+    if (!IS_STATS_PAGE) return;
+
+    const cache = await GM_getValue("petdock_cache_v3", null);
+    const invMaps = await GM_getValue("petdock_inventory_index_v1", null);
+
+    if (!cache || !cache.pairs) return;   // only stop if NO pairs at all
+
+    const pairs = cache.pairs;
+    const grid = document.querySelector(".grid");
+    if (!grid) return;
+
+    // allow missing invMaps — we still show ATK/DEF cards
+    const inventory = invMaps?.index || {};
+
+    const color = (v) => `<span style="color:#5CFF5C">+${v}</span>`;
+    const powerLines = [];
+
+    // Power scaling exclusions when used as LINK pets (from PetDock)
+    const POWER_EXCLUDED_IDS = new Set(["71043", "64279"]); // do not scale power for these links
+    const fmtNum = (n) => (Number.isFinite(n) ? (Math.abs(n) % 1 ? n.toFixed(2) : String(Math.round(n))) : "—");
+
+    // Plain integer formatter (no locale separators)
+    const iPlain = (n) => {
+        const val = Number.isFinite(n) ? Math.round(n) : 0;
+        return String(val);
+    };
+
+    // OVERALL TOTALS (for second .card)
+    let GRAND_ATK = 0;
+    let GRAND_DEF = 0;
+
+    // RENDER ALL ATK/DEF CARDS
+    Object.entries(pairs).forEach(([petId, pair]) => {
+
+        const main = pair.mainStats || {};
+        const l1   = pair.link1Stats || {};
+        const l2   = pair.link2Stats || {};
+
+        const mainAtk = Number.isFinite(main.atk) ? main.atk : 0;
+        const mainDef = Number.isFinite(main.def) ? main.def : 0;
+
+        // Same race logic (your modified factors)
+        const same1 = l1 && main && (String(main.race).toLowerCase() === String(l1.race).toLowerCase());
+        const same2 = l2 && main && (String(main.race).toLowerCase() === String(l2.race).toLowerCase());
+
+        // You changed these ATK/DEF factors:
+        //  - Link1: same 60%, diff 50%
+        //  - Link2: same 35%, diff 25%
+        const f1 = same1 ? 0.60 : 0.50;
+        const f2 = same2 ? 0.35 : 0.25;
+
+        const l1AtkC = l1 ? Math.round((Number.isFinite(l1.atk) ? l1.atk : 0) * f1) : 0;
+        const l1DefC = l1 ? Math.round((Number.isFinite(l1.def) ? l1.def : 0) * f1) : 0;
+
+        const l2AtkC = l2 ? Math.round((Number.isFinite(l2.atk) ? l2.atk : 0) * f2) : 0;
+        const l2DefC = l2 ? Math.round((Number.isFinite(l2.def) ? l2.def : 0) * f2) : 0;
+
+        // Accumulate GRAND totals (main + link contributions)
+        GRAND_ATK += mainAtk + l1AtkC + l2AtkC;
+        GRAND_DEF += mainDef + l1DefC + l2DefC;
+
+        // Create the per-pet card
+        const card = document.createElement("div");
+        card.className = "card";
+        card.id = `gear-last-power-card--grid${petId}`;
+
+        card.innerHTML = `
+            <h3>Pet links</h3>
+
+            <div class="daregon-row">
+                <span>MAIN</span>
+                <span id="p${petId}-main">
+                    ${pair.mainName ?? "***"}<br>
+                    Race: ${main.race ?? "?"}<br>
+                    ATK: ${iPlain(mainAtk)}<br>
+                    DEF: ${iPlain(mainDef)}
+                </span>
+            </div>
+
+            <div class="daregon-row">
+                <span>LINK 1</span>
+                <span id="p${petId}-link1">
+                    ${pair.linkedName ?? "***"}<br>
+                    Race: ${l1.race ?? "?"}<br>
+                    ATK: ${iPlain(Number.isFinite(l1.atk) ? l1.atk : 0)} → ${color(iPlain(l1AtkC))}<br>
+                    DEF: ${iPlain(Number.isFinite(l1.def) ? l1.def : 0)} → ${color(iPlain(l1DefC))}<br>
+                    (${same1 ? "Same race 60%" : "Different race 50%"})
+                </span>
+            </div>
+
+            <div class="daregon-row">
+                <span>LINK 2</span>
+                <span id="p${petId}-link2">
+                    ${pair.linkedName2 ?? "***"}<br>
+                    Race: ${l2.race ?? "?"}<br>
+                    ATK: ${iPlain(Number.isFinite(l2.atk) ? l2.atk : 0)} → ${color(iPlain(l2AtkC))}<br>
+                    DEF: ${iPlain(Number.isFinite(l2.def) ? l2.def : 0)} → ${color(iPlain(l2DefC))}<br>
+                    (${same2 ? "Same race 35%" : "Different race 25%"})
+                </span>
+            </div>
+        `;
+
+        grid.appendChild(card);
+
+        // Collect power descriptions (with numeric contribution for links)
+        const mainPowerText = inventory[main?.id]?.powerText || null;
+        const l1PowerText   = inventory[l1?.id]?.powerText   || null;
+        const l2PowerText   = inventory[l2?.id]?.powerText   || null;
+
+        const mainPowerVal  = Number.isFinite(inventory[main?.id]?.powerValue) ? inventory[main?.id].powerValue : null;
+        const l1PowerVal    = Number.isFinite(inventory[l1?.id]?.powerValue)   ? inventory[l1?.id].powerValue   : null;
+        const l2PowerVal    = Number.isFinite(inventory[l2?.id]?.powerValue)   ? inventory[l2?.id].powerValue   : null;
+
+        if (mainPowerText) {
+            const add = (mainPowerVal != null) ? ` (base +${fmtNum(mainPowerVal)})` : "";
+            powerLines.push(`${pair.mainName}: ${mainPowerText}${add}`);
+        }
+
+        // Power scaling for links: Link1 uses 60%/35%; Link2 uses 50%/25% (unchanged)
+        if (pair.linkedName && l1PowerText) {
+            const excluded = l1?.id && POWER_EXCLUDED_IDS.has(String(l1.id));
+            let suffix = "";
+            if (l1PowerVal != null) {
+                if (!excluded) {
+                    const scaled = l1PowerVal * (same1 ? 0.60 : 0.35);
+                    suffix = ` (×${(same1 ? 0.60 : 0.35).toFixed(2)} ⇒ +${fmtNum(scaled)})`;
+                } else {
+                    suffix = ` (power scaling excluded)`;
+                }
+            }
+            powerLines.push(`${pair.linkedName}: ${l1PowerText}${suffix}`);
+        }
+
+        if (pair.linkedName2 && l2PowerText) {
+            const excluded = l2?.id && POWER_EXCLUDED_IDS.has(String(l2.id));
+            let suffix = "";
+            if (l2PowerVal != null) {
+                if (!excluded) {
+                    const scaled = l2PowerVal * (same2 ? 0.50 : 0.25);
+                    suffix = ` (×${(same2 ? 0.50 : 0.25).toFixed(2)} ⇒ +${fmtNum(scaled)})`;
+                } else {
+                    suffix = ` (power scaling excluded)`;
+                }
+            }
+            powerLines.push(`${pair.linkedName2}: ${l2PowerText}${suffix}`);
+        }
+    });
+
+    // ADD AGGREGATE POWER CARD (AFTER ALL OTHERS)
+    if (powerLines.length > 0) {
+
+        const agg = document.createElement("div");
+        agg.className = "card";
+        agg.id = "gear-last-power-card--aggregate";
+
+        agg.innerHTML = `
+            <h3>All Pet Powers</h3>
+            ${powerLines.map(p => `
+                <div class="daregon-row">
+                    <span>${p}</span>
+                </div>
+            `).join("")}
+        `;
+
+        grid.appendChild(agg);
+    }
+
+    // APPEND TOTALS INTO THE SECOND .card IN .grid
+    const cards = grid.querySelectorAll(".card");
+    if (cards.length >= 2) {
+        const second = cards[1];
+
+        // Try to find existing PET rows. If they don't exist, create them.
+        const findOrMakeRow = (labelText, valueId) => {
+            let valueSpan = second.querySelector(`#${valueId}`);
+            if (valueSpan) return valueSpan;
+
+            const row = document.createElement("div");
+            row.className = "row";
+
+            const lbl = document.createElement("span");
+            lbl.textContent = labelText;
+
+            valueSpan = document.createElement("span");
+            valueSpan.id = valueId;
+            valueSpan.textContent = "***";
+
+            row.appendChild(lbl);
+            row.appendChild(valueSpan);
+            second.appendChild(row);
+
+            return valueSpan;
+        };
+
+        const atkSpan = findOrMakeRow("PET ATTACK", "p-attack");
+        const defSpan = findOrMakeRow("PET DEFENSE", "p-defense");
+
+        // Update totals — plain integers, no separators
+        atkSpan.textContent = iPlain(GRAND_ATK);
+        defSpan.textContent = iPlain(GRAND_DEF);
+    }
+
+})();
 })();
