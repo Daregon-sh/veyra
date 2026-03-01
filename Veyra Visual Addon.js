@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Veyra Visual Addon
 // @namespace    https://github.com/Daregon-sh/veyra
-// @version      1.7.3
+// @version      1.7.4
 // @downloadURL  https://raw.githubusercontent.com/Daregon-sh/veyra/refs/heads/codes/Veyra%20Visual%20Addon.js
 // @updateURL    https://raw.githubusercontent.com/Daregon-sh/veyra/refs/heads/codes/Veyra%20Visual%20Addon.js
 // @description  sidebars visual integration
@@ -12,7 +12,7 @@
 
 window.addEventListener('load', () => {
 
-    ['.side-drawer', '#battleDrawer'].forEach(selector => {
+    ['.side-drawer', '#battleDrawer', '#qs<drawer'].forEach(selector => {
         const el = document.querySelector(selector);
         if (el) {
             el.style.zIndex = '100051';
