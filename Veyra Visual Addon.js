@@ -12,7 +12,7 @@
 
 window.addEventListener('load', () => {
 
-    ['.side-drawer', '#battleDrawer', '#qs<drawer'].forEach(selector => {
+    ['.side-drawer', '#battleDrawer', '#qs-drawer'].forEach(selector => {
         const el = document.querySelector(selector);
         if (el) {
             el.style.zIndex = '100051';
