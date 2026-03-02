@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Veyra Visual Addon
 // @namespace    https://github.com/Daregon-sh/veyra
-// @version      1.7.4
+// @version      1.8.1
 // @downloadURL  https://raw.githubusercontent.com/Daregon-sh/veyra/refs/heads/codes/Veyra%20Visual%20Addon.js
 // @updateURL    https://raw.githubusercontent.com/Daregon-sh/veyra/refs/heads/codes/Veyra%20Visual%20Addon.js
 // @description  sidebars visual integration
@@ -5714,5 +5714,97 @@ function escapeHtml(str) {
   } else {
     init();
   }
+})();
+
+//pet exp calculation
+(function() {
+    'use strict';
+
+    // Restrict execution to pets.php
+    if (!/pets\.php$/.test(window.location.pathname)) return;
+
+    // Treat values (only S and M now)
+    const TREAT_VALUES = {
+        S: 300,
+        M: 9000
+    };
+
+    // Helper to format numbers with commas
+    function formatNumber(num) {
+        return num.toLocaleString();
+    }
+
+    // Create modal container once
+    const modal = document.createElement('div');
+    modal.style.position = 'fixed';
+    modal.style.background = '#222';
+    modal.style.color = '#cfd3ef';
+    modal.style.padding = '10px';
+    modal.style.borderRadius = '6px';
+    modal.style.boxShadow = '0 0 8px rgba(0,0,0,0.5)';
+    modal.style.zIndex = '9999';
+    modal.style.display = 'none';
+    document.body.appendChild(modal);
+
+    // Process each pet slot
+    document.querySelectorAll('.slot-box').forEach(slot => {
+        const currentExpEl = slot.querySelector('.exp-current');
+        const requiredExpEl = slot.querySelector('.exp-required');
+
+        if (!currentExpEl || !requiredExpEl) return;
+
+        const currentExp = parseInt(currentExpEl.textContent.replace(/,/g, ''), 10);
+        const requiredExp = parseInt(requiredExpEl.textContent.replace(/,/g, ''), 10);
+
+        if (isNaN(currentExp) || isNaN(requiredExp)) return;
+
+        const expNeeded = requiredExp - currentExp;
+        const treatsNeeded = Math.ceil(expNeeded / TREAT_VALUES.S);
+
+        // Create hoverable display element
+        const infoDiv = document.createElement('div');
+        infoDiv.className = 'exp-info';
+        infoDiv.style.marginTop = '4px';
+        infoDiv.style.fontSize = '12px';
+        infoDiv.style.color = '#cfd3ef';
+        infoDiv.style.cursor = 'pointer';
+        infoDiv.textContent = `EXP needed: ${formatNumber(expNeeded)} | Treats: ${treatsNeeded}`;
+
+        // On hover, show modal with progressive M+S breakdowns
+        infoDiv.addEventListener('mouseenter', e => {
+            const combos = [];
+
+            // Pure S
+            combos.push(`S only: ${Math.ceil(expNeeded / TREAT_VALUES.S)} S`);
+
+            // Pure M
+            const maxM = Math.floor(expNeeded / TREAT_VALUES.M);
+            if (maxM > 0) combos.push(`M only: ${Math.ceil(expNeeded / TREAT_VALUES.M)} M`);
+
+            // Progressive breakdown: max M down to 0
+            for (let mCount = maxM; mCount >= 1; mCount--) {
+                const remainingExp = expNeeded - mCount * TREAT_VALUES.M;
+                const sCount = Math.ceil(remainingExp / TREAT_VALUES.S);
+                combos.push(`${mCount} M + ${sCount} S`);
+            }
+
+            modal.innerHTML = `<strong>EXP needed: ${formatNumber(expNeeded)}</strong><br><br>` + combos.join('<br>');
+            modal.style.display = 'block';
+
+            // Position modal near cursor
+            modal.style.top = (e.clientY + 15) + 'px';
+            modal.style.left = (e.clientX + 15) + 'px';
+        });
+
+        infoDiv.addEventListener('mouseleave', () => {
+            modal.style.display = 'none';
+        });
+
+        // Insert right under exp-top
+        const expTop = slot.querySelector('.exp-top');
+        if (expTop) {
+            expTop.insertAdjacentElement('afterend', infoDiv);
+        }
+    });
 })();
 
