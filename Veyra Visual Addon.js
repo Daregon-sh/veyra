@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Veyra Visual Addon
 // @namespace    https://github.com/Daregon-sh/veyra
-// @version      1.9.1
+// @version      1.10.1
 // @downloadURL  https://raw.githubusercontent.com/Daregon-sh/veyra/refs/heads/codes/Veyra%20Visual%20Addon.js
 // @updateURL    https://raw.githubusercontent.com/Daregon-sh/veyra/refs/heads/codes/Veyra%20Visual%20Addon.js
 // @description  sidebars visual integration
@@ -6061,3 +6061,354 @@ function escapeHtml(str) {
     });
 })();
 
+//compress thedude's monster filter to dropdown
+(function () {
+  'use strict';
+
+  // ===== CONFIG =====
+  const CONTAINER_ID = 'wave-addon-monster-filter-container';
+  const LIST_ID = 'wave-addon-mob-filter';
+  const THEME = {
+    bg: 'rgba(17, 20, 35, 0.95)',
+    border: 'rgba(87, 103, 160, 0.35)',
+    text: 'rgb(230, 233, 255)',
+    hover: 'rgba(255, 255, 255, 0.06)',
+    accent: 'rgb(142, 160, 255)',
+    shadow: '0 8px 24px rgba(0,0,0,0.35)'
+  };
+
+  // Global one-shot guard
+  if (window.__mobFilterDropdownInit) return;
+  window.__mobFilterDropdownInit = true;
+
+  // ===== UTIL: wait for an element =====
+  function waitForEl(selector, timeout = 15000) {
+    return new Promise((resolve, reject) => {
+      const el = document.querySelector(selector);
+      if (el) return resolve(el);
+
+      const obs = new MutationObserver(() => {
+        const e = document.querySelector(selector);
+        if (e) {
+          obs.disconnect();
+          resolve(e);
+        }
+      });
+
+      obs.observe(document.documentElement || document.body, {
+        childList: true,
+        subtree: true
+      });
+
+      setTimeout(() => {
+        obs.disconnect();
+        reject(new Error(`Timeout waiting for ${selector}`));
+      }, timeout);
+    });
+  }
+
+  // ===== STYLE INJECTION =====
+  function injectStyles() {
+    if (document.getElementById('mob-filter-dropdown-styles')) return;
+    const css = `
+      .mob-dd {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        min-width: 220px;
+      }
+      .mob-dd__btn {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        background: ${THEME.bg};
+        color: ${THEME.text};
+        border: 1px solid ${THEME.border};
+        border-radius: 8px;
+        padding: 8px 10px;
+        font-size: 13px;
+        cursor: pointer;
+        user-select: none;
+        box-shadow: ${THEME.shadow};
+        transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
+      }
+      .mob-dd__btn:hover {
+        background: ${THEME.hover};
+        border-color: ${THEME.accent};
+        box-shadow: 0 10px 28px rgba(0,0,0,0.4);
+      }
+      .mob-dd__btn .mob-dd__label {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        opacity: 0.95;
+      }
+      .mob-dd__btn .mob-dd__count {
+        font-size: 12px;
+        color: ${THEME.accent};
+        background: rgba(142,160,255,0.12);
+        border: 1px solid rgba(142,160,255,0.25);
+        padding: 2px 6px;
+        border-radius: 999px;
+      }
+      .mob-dd__btn .mob-dd__chev {
+        width: 10px;
+        height: 10px;
+        transform: rotate(0deg);
+        transition: transform 0.15s ease;
+        opacity: 0.85;
+      }
+      .mob-dd__btn[aria-expanded="true"] .mob-dd__chev {
+        transform: rotate(180deg);
+      }
+      .mob-dd__panel {
+        position: absolute;
+        top: calc(100% + 6px);
+        left: 0;
+        z-index: 9999;
+        display: none;
+        background: ${THEME.bg};
+        border: 1px solid ${THEME.border};
+        border-radius: 10px;
+        padding: 8px;
+        width: 100%;
+        max-height: 280px;
+        overflow: auto;
+        box-shadow: ${THEME.shadow};
+      }
+      .mob-dd__panel.is-open {
+        display: block;
+      }
+      .mob-dd__panel label:hover {
+        background: ${THEME.hover} !important;
+      }
+      .mob-dd__tools {
+        position: sticky;
+        top: -8px;
+        background: linear-gradient(180deg, ${THEME.bg} 70%, transparent);
+        padding: 6px 4px 2px;
+        display: flex;
+        gap: 6px;
+        z-index: 1;
+      }
+      .mob-dd__chip {
+        font-size: 11px;
+        color: ${THEME.text};
+        border: 1px solid ${THEME.border};
+        border-radius: 999px;
+        padding: 3px 8px;
+        cursor: pointer;
+        background: rgba(255,255,255,0.04);
+        transition: background 0.15s, border-color 0.15s;
+        user-select: none;
+      }
+      .mob-dd__chip:hover {
+        background: ${THEME.hover};
+        border-color: ${THEME.accent};
+      }
+    `.trim();
+    const style = document.createElement('style');
+    style.id = 'mob-filter-dropdown-styles';
+    style.textContent = css;
+    document.head.appendChild(style);
+  }
+
+  function createChevron() {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('class', 'mob-dd__chev');
+    const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    p.setAttribute('fill', THEME.text);
+    p.setAttribute('d', 'M7 10l5 5 5-5z');
+    svg.appendChild(p);
+    return svg;
+  }
+
+  function enhanceAsDropdown(container, list) {
+    // If already enhanced, do nothing (prevents duplicates)
+    if (container.querySelector('.mob-dd')) return;
+
+    // Build wrapper
+    const ddWrap = document.createElement('div');
+    ddWrap.className = 'mob-dd';
+
+    // Button
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'mob-dd__btn';
+    btn.setAttribute('aria-haspopup', 'listbox');
+    btn.setAttribute('aria-expanded', 'false');
+
+    const labelSpan = document.createElement('span');
+    labelSpan.className = 'mob-dd__label';
+    labelSpan.textContent = 'Filter Monsters';
+    labelSpan.style.opacity = '0.8';
+
+    const countSpan = document.createElement('span');
+    countSpan.className = 'mob-dd__count';
+    countSpan.textContent = '0 selected';
+
+    btn.append(labelSpan, countSpan, createChevron());
+
+    // Panel
+    const panel = document.createElement('div');
+    panel.className = 'mob-dd__panel';
+    panel.setAttribute('role', 'listbox');
+    panel.setAttribute('aria-multiselectable', 'true');
+
+    // Tools (optional)
+    const tools = document.createElement('div');
+    tools.className = 'mob-dd__tools';
+    const chipAll = document.createElement('span');
+    chipAll.className = 'mob-dd__chip';
+    chipAll.textContent = 'Select All';
+    const chipNone = document.createElement('span');
+    chipNone.className = 'mob-dd__chip';
+    chipNone.textContent = 'Clear';
+    tools.append(chipAll, chipNone);
+    panel.appendChild(tools);
+
+    // Move the existing checkbox labels into the panel (not cloning!)
+    list.style.display = 'flex';
+    list.style.flexDirection = 'column';
+    list.style.gap = '8px';
+    panel.appendChild(list);
+
+    // Insert
+    container.style.gap = '8px';
+    container.appendChild(ddWrap);
+    ddWrap.appendChild(btn);
+    ddWrap.appendChild(panel);
+
+    // Update count helper
+    function updateCount() {
+      const inputs = panel.querySelectorAll('input[type="checkbox"]');
+      let checked = 0;
+      inputs.forEach(i => { if (i.checked) checked++; });
+      countSpan.textContent = `${checked} selected`;
+    }
+    updateCount();
+
+    // Toggle behavior
+    function openPanel() {
+      panel.classList.add('is-open');
+      btn.setAttribute('aria-expanded', 'true');
+    }
+    function closePanel() {
+      panel.classList.remove('is-open');
+      btn.setAttribute('aria-expanded', 'false');
+    }
+    function togglePanel() {
+      const isOpen = panel.classList.contains('is-open');
+      if (isOpen) closePanel(); else openPanel();
+    }
+
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      togglePanel();
+    });
+
+    // Close on outside click
+    document.addEventListener('click', (e) => {
+      if (!ddWrap.contains(e.target)) {
+        closePanel();
+      }
+    });
+
+    // Keyboard support
+    btn.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        togglePanel();
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        openPanel();
+        const firstInput = panel.querySelector('input[type="checkbox"]');
+        firstInput?.focus();
+      }
+    });
+
+    panel.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        closePanel();
+        btn.focus();
+      }
+    });
+
+    // Listen for changes to keep count synced
+    panel.addEventListener('change', (e) => {
+      if (e.target && e.target.matches('input[type="checkbox"]')) {
+        updateCount();
+      }
+    });
+
+    // Select all / clear
+    chipAll.addEventListener('click', () => {
+      panel.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+        if (!cb.checked) {
+          cb.checked = true;
+          cb.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      });
+      updateCount();
+    });
+    chipNone.addEventListener('click', () => {
+      panel.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+        if (cb.checked) {
+          cb.checked = false;
+          cb.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      });
+      updateCount();
+    });
+
+    // Keep badge in sync if external code toggles .checked
+    const mo = new MutationObserver(updateCount);
+    panel.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+      mo.observe(cb, { attributes: true, attributeFilter: ['checked'] });
+    });
+  }
+
+  let bootObserver; // so we can disconnect after success
+
+  async function init() {
+    try {
+      const container = await waitForEl(`#${CONTAINER_ID}`);
+      const list = await waitForEl(`#${LIST_ID}`);
+
+      // If already enhanced (e.g., by a previous run), stop
+      if (container.querySelector('.mob-dd')) {
+        if (bootObserver) bootObserver.disconnect();
+        return;
+      }
+
+      injectStyles();
+      enhanceAsDropdown(container, list);
+
+      // After successful enhancement, stop the boot observer
+      if (bootObserver) bootObserver.disconnect();
+    } catch (err) {
+      // Silent fail if target not present
+    }
+  }
+
+  // Run when DOM is ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init, { once: true });
+  } else {
+    init();
+  }
+
+  // In case the target is mounted dynamically later
+  bootObserver = new MutationObserver(() => {
+    const container = document.getElementById(CONTAINER_ID);
+    const list = document.getElementById(LIST_ID);
+    // Only init if both exist and not yet enhanced
+    if (container && list && !container.querySelector('.mob-dd')) {
+      init();
+    }
+  });
+  bootObserver.observe(document.documentElement || document.body, { childList: true, subtree: true });
+})();
