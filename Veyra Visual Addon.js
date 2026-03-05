@@ -6677,3 +6677,667 @@ function escapeHtml(str) {
   });
   bootObserver.observe(document.documentElement || document.body, { childList: true, subtree: true });
 })();
+(function () {
+  'use strict';
+
+  // ===== CONFIG =====
+  const COMBAT_ID = 'wave-addon-combat-panel';        // prefer ID
+  const COMBAT_CLASS = 'wave-addon-combat-panel';     // fallback class
+  const AUTO_HUNT_ID = 'wave-addon-auto-hunt-controls';
+  const NEW_PANEL_ID = 'wave-addon-auto-hunt-panel';
+  const PLACE_NEW_PANEL = 'after'; // 'after' (default) or 'before' the combat panel
+
+  // One-shot guard
+  if (window.__waveExtractAutoHuntInit) return;
+  window.__waveExtractAutoHuntInit = true;
+
+  // ===== UTIL =====
+  function qCombatPanel() {
+    return document.getElementById(COMBAT_ID) || document.querySelector(`.${COMBAT_CLASS}`);
+  }
+  function waitForEl(selector, timeout = 15000) {
+    return new Promise((resolve, reject) => {
+      const el = document.querySelector(selector);
+      if (el) return resolve(el);
+      const obs = new MutationObserver(() => {
+        const e = document.querySelector(selector);
+        if (e) {
+          obs.disconnect();
+          resolve(e);
+        }
+      });
+      obs.observe(document.documentElement || document.body, { childList: true, subtree: true });
+      setTimeout(() => { obs.disconnect(); reject(new Error('Timeout: ' + selector)); }, timeout);
+    });
+  }
+  function insertAfter(ref, node) {
+    if (!ref || !ref.parentNode) return;
+    if (ref.nextSibling) ref.parentNode.insertBefore(node, ref.nextSibling);
+    else ref.parentNode.appendChild(node);
+  }
+  function injectStyles() {
+    if (document.getElementById('wave-auto-hunt-panel-styles')) return;
+    const style = document.createElement('style');
+    style.id = 'wave-auto-hunt-panel-styles';
+    style.textContent = `
+      /* New panel matches your other panels' look */
+      #${NEW_PANEL_ID} {
+        background: rgb(25, 26, 36);
+        border: 1px solid rgb(43, 45, 68);
+        border-radius: 10px;
+        padding: 12px 14px;
+        margin-bottom: 12px;
+        box-shadow: rgba(0, 0, 0, 0.8) 0px 6px 18px;
+        position: relative; /* for any absolute children if needed */
+      }
+    `.trim();
+    document.head.appendChild(style);
+  }
+
+  function enhance() {
+    const combatPanel = qCombatPanel();
+    const autoHunt = document.getElementById(AUTO_HUNT_ID);
+
+    if (!autoHunt) return; // nothing to do
+    // If already extracted into the new panel, bail
+    if (autoHunt.closest(`#${NEW_PANEL_ID}`)) return;
+
+    // Try to grab the smallest wrapper that contains Auto Hunt controls and its collapse button.
+    // In your markup, it's the immediate parent column of #wave-addon-auto-hunt-controls.
+    // Example:
+    // <div style="display:flex; flex-direction:column; ...">
+    //   <div id="wave-addon-auto-hunt-controls">...</div>
+    //   <button class="wave-ah__collapse-btn">...</button>
+    // </div>
+    let holder = autoHunt.parentElement;
+    // Safety: if the parent is the combat panel itself (edge case), just move the #AUTO_HUNT_ID
+    if (holder === combatPanel || !holder) {
+      holder = autoHunt;
+    }
+
+    // Create the new top-level Auto Hunt panel
+    if (!document.getElementById(NEW_PANEL_ID)) {
+      const newPanel = document.createElement('div');
+      newPanel.id = NEW_PANEL_ID;
+
+      // Insert relative to the Combat panel if we have it; else append near current location
+      if (combatPanel) {
+        if (PLACE_NEW_PANEL === 'before') {
+          combatPanel.parentNode.insertBefore(newPanel, combatPanel);
+        } else {
+          insertAfter(combatPanel, newPanel);
+        }
+      } else {
+        // Fallback: place it after the holder's current container
+        const parent = holder.parentNode;
+        insertAfter(parent, newPanel);
+      }
+    }
+
+    const newPanelEl = document.getElementById(NEW_PANEL_ID);
+    if (!newPanelEl) return;
+
+    // Move the holder (which includes the collapse button if it was a sibling)
+    newPanelEl.appendChild(holder);
+
+    // Optional: tidy up spacing inside holder now that it's standalone
+    // (You can tweak or remove these if your spacing was already perfect)
+    holder.style.margin = '0'; // remove any column margin that looked better in a grid
+  }
+
+  async function init() {
+    try {
+      // Wait for Auto Hunt to exist
+      await waitForEl(`#${AUTO_HUNT_ID}`);
+      // Styles for the new panel
+      injectStyles();
+      // Build/extract
+      enhance();
+
+      // If in an SPA, watch for re-mounts: re-extract only if needed
+      const bootObserver = new MutationObserver(() => {
+        const autoHunt = document.getElementById(AUTO_HUNT_ID);
+        const newPanel = document.getElementById(NEW_PANEL_ID);
+        if (autoHunt && !autoHunt.closest(`#${NEW_PANEL_ID}`)) {
+          injectStyles();
+          enhance();
+        }
+      });
+      bootObserver.observe(document.documentElement || document.body, { childList: true, subtree: true });
+    } catch (e) {
+      // silent fail
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init, { once: true });
+  } else {
+    init();
+  }
+})();
+(function () {
+  'use strict';
+
+  // ===== CONFIG =====
+  const PANEL_ID = 'wave-addon-combat-panel';     // prefer ID
+  const PANEL_CLASS = 'wave-addon-combat-panel';  // fallback class
+  const STORAGE_KEY = '__wave_combat_collapsed';
+
+  // One-shot guard
+  if (window.__waveCombatCollapseInit) return;
+  window.__waveCombatCollapseInit = true;
+
+  // ===== UTIL =====
+  function waitForPanel(timeout = 15000) {
+    return new Promise((resolve, reject) => {
+      const query = () => document.getElementById(PANEL_ID) || document.querySelector(`.${PANEL_CLASS}`);
+      const found = query();
+      if (found) return resolve(found);
+
+      const obs = new MutationObserver(() => {
+        const p = query();
+        if (p) {
+          obs.disconnect();
+          resolve(p);
+        }
+      });
+      obs.observe(document.documentElement || document.body, { childList: true, subtree: true });
+
+      setTimeout(() => {
+        obs.disconnect();
+        reject(new Error('Timeout waiting for combat panel'));
+      }, timeout);
+    });
+  }
+
+  function injectStyles() {
+    if (document.getElementById('wave-combat-collapse-styles')) return;
+    const style = document.createElement('style');
+    style.id = 'wave-combat-collapse-styles';
+    style.textContent = `
+      #${PANEL_ID}, .${PANEL_CLASS} { position: relative; }
+
+      .wave-cp__collapse-btn {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        width: 24px;
+        height: 24px;
+        border-radius: 6px;
+        border: 1px solid rgba(87, 103, 160, 0.35);
+        background: rgba(17, 20, 35, 0.75);
+        color: rgb(230, 233, 255);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        padding: 0;
+        outline: none;
+        box-shadow: 0 6px 18px rgba(0,0,0,0.25);
+        transition: background 0.15s, border-color 0.15s, transform 0.15s;
+        user-select: none;
+        z-index: 2;
+      }
+      .wave-cp__collapse-btn:hover {
+        background: rgba(255,255,255,0.06);
+        border-color: rgb(142,160,255);
+      }
+      .wave-cp__collapse-btn:active { transform: translateY(1px); }
+      .wave-cp__collapse-btn svg { width: 14px; height: 14px; opacity: 0.9; }
+
+      /* Main content wrapper (we create this) */
+      .wave-cp__content {
+        overflow: clip;
+        transition: height 180ms ease, opacity 120ms ease;
+        will-change: height;
+      }
+
+      /* Peek bar that only shows the "☑️ Selection:" line when collapsed */
+      .wave-cp__peek {
+        display: none;
+        align-items: center;
+        gap: 8px;
+        /* Match your heading styling */
+        color: rgb(230, 233, 255);
+        font-weight: 500;
+        font-size: 13px;
+        /* Reserve room for the top-right button so text doesn't sit under it */
+        padding-right: 28px;
+        min-height: 20px; /* keeps a neat single-line bar */
+      }
+
+      /* Collapsed state rules */
+      .is-collapsed .wave-cp__peek { display: flex; }
+      .is-collapsed .wave-cp__content { height: 0 !important; opacity: 0; }
+    `.trim();
+    document.head.appendChild(style);
+  }
+
+  function createChevronIcon(direction = 'up') {
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(svgNS, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    const path = document.createElementNS(svgNS, 'path');
+    path.setAttribute('fill', 'currentColor');
+    path.setAttribute('d', 'M7.41 15.41L12 10.83l4.59 4.58L18 14l-6-6-6 6z');
+    svg.appendChild(path);
+    if (direction === 'down') svg.style.transform = 'rotate(180deg)';
+    return svg;
+  }
+
+  function enhance(panel) {
+    // Avoid duplicates
+    if (panel.querySelector('.wave-cp__collapse-btn')) return;
+
+    // Grab the original "☑️ Selection:" title if present to build the peek
+    // Structure assumption: first column is :scope > div:first-child, its first child is the title row
+    const selectionTitleEl =
+      panel.querySelector(':scope > div:first-child > div:first-child');
+
+    // Create the peek bar (single line "☑️ Selection:")
+    const peek = document.createElement('div');
+    peek.className = 'wave-cp__peek';
+    if (selectionTitleEl) {
+      // Use the exact text from the source header to keep emojis/text in sync
+      peek.textContent = selectionTitleEl.textContent?.trim() || '☑️ Selection:';
+    } else {
+      peek.textContent = '☑️ Selection:'; // fallback
+    }
+
+    // Wrap all current children into a collapsible content container
+    const contentWrap = document.createElement('div');
+    contentWrap.className = 'wave-cp__content';
+
+    const kids = Array.from(panel.childNodes);
+    kids.forEach(n => {
+      if (n.nodeType === 1 && n.classList && n.classList.contains('wave-cp__collapse-btn')) return;
+      contentWrap.appendChild(n); // move, not clone
+    });
+
+    // Insert peek first, then content
+    panel.appendChild(peek);
+    panel.appendChild(contentWrap);
+
+    // Add the top-right button
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'wave-cp__collapse-btn';
+    btn.setAttribute('aria-label', 'Collapse Combat Panel');
+    btn.setAttribute('title', 'Collapse/Expand');
+    const icon = createChevronIcon('up');
+    btn.appendChild(icon);
+    panel.appendChild(btn);
+
+    // Smooth expansion sizing
+    function setContentHeightToAuto() {
+      contentWrap.style.height = 'auto';
+      const h = contentWrap.scrollHeight;
+      contentWrap.style.height = `${h}px`;
+      contentWrap.style.opacity = '1';
+    }
+
+    // Initial sizing after layout
+    requestAnimationFrame(() => {
+      setContentHeightToAuto();
+    });
+
+    // Restore persisted state
+    const isCollapsedStored = localStorage.getItem(STORAGE_KEY) === '1';
+    if (isCollapsedStored) {
+      panel.classList.add('is-collapsed');
+      contentWrap.style.height = '0px';
+      contentWrap.style.opacity = '0';
+      icon.style.transform = 'rotate(180deg)'; // down arrow when collapsed
+      btn.setAttribute('aria-label', 'Expand Combat Panel');
+    } else {
+      setContentHeightToAuto();
+    }
+
+    // Toggle behavior
+    function collapse() {
+      // Fix current height to start the transition
+      const current = contentWrap.getBoundingClientRect().height || contentWrap.scrollHeight;
+      contentWrap.style.height = `${current}px`;
+      requestAnimationFrame(() => {
+        panel.classList.add('is-collapsed');
+        contentWrap.style.height = '0px';
+        contentWrap.style.opacity = '0';
+        icon.style.transform = 'rotate(180deg)'; // down
+        btn.setAttribute('aria-label', 'Expand Combat Panel');
+        localStorage.setItem(STORAGE_KEY, '1');
+      });
+    }
+
+    function expand() {
+      // Measure expanded height
+      const target = contentWrap.scrollHeight;
+      contentWrap.style.height = `${target}px`;
+      contentWrap.style.opacity = '1';
+      panel.classList.remove('is-collapsed');
+      icon.style.transform = ''; // up
+      btn.setAttribute('aria-label', 'Collapse Combat Panel');
+      localStorage.setItem(STORAGE_KEY, '0');
+
+      const onEnd = () => {
+        if (!panel.classList.contains('is-collapsed')) {
+          contentWrap.style.height = 'auto';
+        }
+        contentWrap.removeEventListener('transitionend', onEnd);
+      };
+      contentWrap.addEventListener('transitionend', onEnd);
+    }
+
+    function toggle() {
+      if (panel.classList.contains('is-collapsed')) expand();
+      else collapse();
+    }
+
+    // Button events
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggle();
+    });
+    btn.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        toggle();
+      }
+    });
+
+    // Keep expanded height in sync on content changes
+    const ro = new ResizeObserver(() => {
+      if (!panel.classList.contains('is-collapsed')) {
+        setContentHeightToAuto();
+      }
+    });
+    ro.observe(contentWrap);
+  }
+
+  async function init() {
+    try {
+      const panel = await waitForPanel();
+      injectStyles();
+      if (panel.querySelector('.wave-cp__collapse-btn')) return;
+      enhance(panel);
+    } catch (e) {
+      // silent fail
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init, { once: true });
+  } else {
+    init();
+  }
+
+  // SPA safety net
+  const bootObserver = new MutationObserver(() => {
+    const panel = document.getElementById(PANEL_ID) || document.querySelector(`.${PANEL_CLASS}`);
+    if (panel && !panel.querySelector('.wave-cp__collapse-btn')) {
+      injectStyles();
+      enhance(panel);
+    }
+  });
+  bootObserver.observe(document.documentElement || document.body, { childList: true, subtree: true });
+})();
+(function () {
+  'use strict';
+
+  // ===== CONFIG =====
+  const PANEL_ID = 'wave-addon-filter-panel';       // prefer ID if present
+  const PANEL_CLASS = 'wave-addon-filter-panel';    // fallback class
+  const STORAGE_KEY = '__wave_filter_collapsed';    // localStorage key
+
+  // One-shot guard (avoid duplicates across SPA loads / re-injections)
+  if (window.__waveFilterCollapseInit) return;
+  window.__waveFilterCollapseInit = true;
+
+  // ===== UTIL =====
+  function waitForPanel(timeout = 15000) {
+    return new Promise((resolve, reject) => {
+      const query = () =>
+        document.getElementById(PANEL_ID) ||
+        document.querySelector(`.${PANEL_CLASS}`);
+      const found = query();
+      if (found) return resolve(found);
+
+      const obs = new MutationObserver(() => {
+        const p = query();
+        if (p) {
+          obs.disconnect();
+          resolve(p);
+        }
+      });
+      obs.observe(document.documentElement || document.body, { childList: true, subtree: true });
+
+      setTimeout(() => {
+        obs.disconnect();
+        reject(new Error('Timeout waiting for filter panel'));
+      }, timeout);
+    });
+  }
+
+  function injectStyles() {
+    if (document.getElementById('wave-filter-collapse-styles')) return;
+    const style = document.createElement('style');
+    style.id = 'wave-filter-collapse-styles';
+    style.textContent = `
+      /* Ensure positioning context for the top-right button */
+      #${PANEL_ID}, .${PANEL_CLASS} { position: relative; }
+
+      /* Top-right chevron button */
+      .wave-fp__collapse-btn {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        width: 24px;
+        height: 24px;
+        border-radius: 6px;
+        border: 1px solid rgba(87, 103, 160, 0.35);
+        background: rgba(17, 20, 35, 0.75);
+        color: rgb(230, 233, 255);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        padding: 0;
+        outline: none;
+        box-shadow: 0 6px 18px rgba(0,0,0,0.25);
+        transition: background 0.15s, border-color 0.15s, transform 0.15s;
+        user-select: none;
+        z-index: 2;
+      }
+      .wave-fp__collapse-btn:hover {
+        background: rgba(255,255,255,0.06);
+        border-color: rgb(142,160,255);
+      }
+      .wave-fp__collapse-btn:active { transform: translateY(1px); }
+      .wave-fp__collapse-btn svg { width: 14px; height: 14px; opacity: 0.9; }
+
+      /* Collapsible content wrapper */
+      .wave-fp__content {
+        overflow: clip;
+        transition: height 180ms ease, opacity 120ms ease;
+        will-change: height;
+      }
+
+      /* Single-line peek bar: only shows the "🎯 Filter Monsters:" text while collapsed */
+      .wave-fp__peek {
+        display: none;
+        align-items: center;
+        gap: 8px;
+        color: rgb(230, 233, 255);
+        font-weight: 500;
+        font-size: 13px;
+        padding-right: 28px; /* space for the top-right button */
+        min-height: 20px;
+      }
+
+      /* Collapsed state rules */
+      .is-collapsed .wave-fp__peek { display: flex; }
+      .is-collapsed .wave-fp__content { height: 0 !important; opacity: 0; }
+    `.trim();
+    document.head.appendChild(style);
+  }
+
+  function createChevronIcon(direction = 'up') {
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(svgNS, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    const path = document.createElementNS(svgNS, 'path');
+    path.setAttribute('fill', 'currentColor');
+    path.setAttribute('d', 'M7.41 15.41L12 10.83l4.59 4.58L18 14l-6-6-6 6z');
+    svg.appendChild(path);
+    if (direction === 'down') svg.style.transform = 'rotate(180deg)';
+    return svg;
+  }
+
+  function enhance(panel) {
+    // Avoid duplicates
+    if (panel.querySelector('.wave-fp__collapse-btn')) return;
+
+    // Try to read the exact "🎯 Filter Monsters:" text from the first column heading
+    const monstersTitleEl =
+      panel.querySelector('#wave-addon-monster-filter-container > div:first-child')
+      || panel.querySelector(':scope > div:first-child > div:first-child');
+
+    // Build the single-line peek bar
+    const peek = document.createElement('div');
+    peek.className = 'wave-fp__peek';
+    const peekText = (monstersTitleEl?.textContent || '🎯 Filter Monsters:').trim();
+    peek.textContent = peekText;
+
+    // Wrap all current children as collapsible content
+    const contentWrap = document.createElement('div');
+    contentWrap.className = 'wave-fp__content';
+
+    const kids = Array.from(panel.childNodes);
+    kids.forEach(n => {
+      if (n.nodeType === 1 && n.classList && n.classList.contains('wave-fp__collapse-btn')) return;
+      contentWrap.appendChild(n); // move nodes (preserves listeners)
+    });
+
+    // Insert peek first, then content
+    panel.appendChild(peek);
+    panel.appendChild(contentWrap);
+
+    // Add the top-right collapse button
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'wave-fp__collapse-btn';
+    btn.setAttribute('aria-label', 'Collapse Filter Panel');
+    btn.setAttribute('title', 'Collapse/Expand');
+    const icon = createChevronIcon('up');
+    btn.appendChild(icon);
+    panel.appendChild(btn);
+
+    // Height helper for smooth expansion
+    function setContentHeightToAuto() {
+      contentWrap.style.height = 'auto';
+      const h = contentWrap.scrollHeight;
+      contentWrap.style.height = `${h}px`;
+      contentWrap.style.opacity = '1';
+    }
+
+    // Initial sizing after layout paint
+    requestAnimationFrame(() => {
+      setContentHeightToAuto();
+    });
+
+    // Restore persisted state
+    const isCollapsedStored = localStorage.getItem(STORAGE_KEY) === '1';
+    if (isCollapsedStored) {
+      panel.classList.add('is-collapsed');
+      contentWrap.style.height = '0px';
+      contentWrap.style.opacity = '0';
+      icon.style.transform = 'rotate(180deg)'; // down arrow when collapsed
+      btn.setAttribute('aria-label', 'Expand Filter Panel');
+    } else {
+      setContentHeightToAuto();
+    }
+
+    // Toggle behavior
+    function collapse() {
+      const current = contentWrap.getBoundingClientRect().height || contentWrap.scrollHeight;
+      contentWrap.style.height = `${current}px`;
+      requestAnimationFrame(() => {
+        panel.classList.add('is-collapsed');
+        contentWrap.style.height = '0px';
+        contentWrap.style.opacity = '0';
+        icon.style.transform = 'rotate(180deg)'; // down
+        btn.setAttribute('aria-label', 'Expand Filter Panel');
+        localStorage.setItem(STORAGE_KEY, '1');
+      });
+    }
+
+    function expand() {
+      const target = contentWrap.scrollHeight;
+      contentWrap.style.height = `${target}px`;
+      contentWrap.style.opacity = '1';
+      panel.classList.remove('is-collapsed');
+      icon.style.transform = ''; // up
+      btn.setAttribute('aria-label', 'Collapse Filter Panel');
+      localStorage.setItem(STORAGE_KEY, '0');
+
+      const onEnd = () => {
+        if (!panel.classList.contains('is-collapsed')) {
+          contentWrap.style.height = 'auto';
+        }
+        contentWrap.removeEventListener('transitionend', onEnd);
+      };
+      contentWrap.addEventListener('transitionend', onEnd);
+    }
+
+    function toggle() {
+      if (panel.classList.contains('is-collapsed')) expand();
+      else collapse();
+    }
+
+    // Button events
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggle();
+    });
+    btn.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        toggle();
+      }
+    });
+
+    // Keep expanded height in sync when content changes
+    const ro = new ResizeObserver(() => {
+      if (!panel.classList.contains('is-collapsed')) {
+        setContentHeightToAuto();
+      }
+    });
+    ro.observe(contentWrap);
+  }
+
+  async function init() {
+    try {
+      const panel = await waitForPanel();
+      injectStyles();
+      if (panel.querySelector('.wave-fp__collapse-btn')) return;
+      enhance(panel);
+    } catch (e) {
+      // silent fail
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init, { once: true });
+  } else {
+    init();
+  }
+
+  // SPA safety net
+  const bootObserver = new MutationObserver(() => {
+    const panel = document.getElementById(PANEL_ID) || document.querySelector(`.${PANEL_CLASS}`);
+    if (panel && !panel.querySelector('.wave-fp__collapse-btn')) {
+      injectStyles();
+      enhance(panel);
+    }
+  });
+  bootObserver.observe(document.documentElement || document.body, { childList: true, subtree: true });
+})();
