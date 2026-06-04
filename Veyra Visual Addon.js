@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Veyra Visual Addon
 // @namespace    https://github.com/Daregon-sh/veyra
-// @version      2.18.6
+// @version      2.18.7
 // @downloadURL  https://raw.githubusercontent.com/Daregon-sh/veyra/refs/heads/codes/Veyra%20Visual%20Addon.js
 // @updateURL    https://raw.githubusercontent.com/Daregon-sh/veyra/refs/heads/codes/Veyra%20Visual%20Addon.js
 // @description  sidebars visual integration
@@ -1128,6 +1128,7 @@ function modifySideNav() {
       <div class="submenu-group" style="margin-left: 10px; margin-top: 10px;">
         <div class="submenu-title" style="font-weight:600; color:#e6e6e6; margin-bottom:4px;">Olympus</div>
         <div class="submenu-items">
+
           <div style="font-size:12px;margin-left: 15px; padding: 6px; background: rgba(30, 30, 46, 0.5); border-radius: 4px; border-left: 2px solid #e59f5a;">
             <a style="text-decoration: none; color:white;" href="/active_wave.php?gate=5&wave=9">
               <span class="side-icon">⚔️</span>
@@ -1135,6 +1136,7 @@ function modifySideNav() {
               <span class="side-icon">🏛️ 🔱 🛡️</span>
             </a>
           </div>
+
           <div style="font-size:12px;margin-left: 15px; padding: 6px; background: rgba(30, 30, 46, 0.5); border-radius: 4px; border-left: 2px solid #e59f5a;">
             <a style="text-decoration: none; color:white;" href="/active_wave.php?gate=5&wave=10">
               <span class="side-icon">⚔️</span>
@@ -1142,6 +1144,15 @@ function modifySideNav() {
               <span class="side-icon">🏛️ ⚚ 🛡️</span>
             </a>
           </div>
+
+          <div style="font-size:10px;margin-left: 15px; padding: 6px; background: rgba(30, 30, 46, 0.5); border-radius: 4px; border-left: 2px solid #e59f5a;">
+            <a style="text-decoration: none; color:white;" href="/active_wave.php?gate=5&wave=11">
+              <span class="side-icon">⚔️</span>
+              <span class="side-label">Artemis</span>
+              <span class="side-icon">🏛️ 🏹 🛡️</span>
+            </a>
+          </div>
+
         </div>
       </div>
     `;
@@ -12079,6 +12090,9 @@ function getDisplayGateWave(gate, wave) {
   if (gate === 5 && wave === 10) {
     return { gate: 2, wave: 2 };
   }
+  if (gate === 5 && wave === 11) {
+    return { gate: 2, wave: 3 };
+  }
   return { gate, wave };
 }
 
@@ -12087,7 +12101,8 @@ function getDisplayGateWave(gate, wave) {
   const gatesConfig = [
     { gate: 3, wave: 8 },
     { gate: 5, wave: 9 },
-    { gate: 5, wave: 10}
+    { gate: 5, wave: 10},
+    { gate: 5, wave: 11}
   ];
 
   /* ================= ALERT SYSTEM ================= */
@@ -14161,9 +14176,11 @@ let manaBusterMinStamina = 200; // default threshold
                         }
 
                         // 🔋 Auto MP refill trigger (20 or less)
-                        if (result.mana <= 20) {
+                        // 🔋 Auto MP refill (ONLY when Mana Buster is enabled)
+                        if (useManaBuster && result.mana <= 20) {
                             await useSmallManaPotions(SMALL_MANA_POTION_BURST);
                         }
+
                     }
 
 
@@ -14241,8 +14258,10 @@ let manaBusterMinStamina = 200; // default threshold
                         continue;
                     }
 
-                    const total = getMyDamage(result);
+
+                    const total = result?.totaldmgdealt ?? 0;
                     damage = Math.max(0, total - initialMonsterDamage);
+
                     monsterDamageTracker.set(dgmid, damage);
                     // ✅ Apply EXP locally using server delta
                     if (typeof result?.xp_delta === 'number') {
