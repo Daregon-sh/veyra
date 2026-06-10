@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Veyra Visual Addon
 // @namespace    https://github.com/Daregon-sh/veyra
-// @version      2.18.7
+// @version      2.18.8
 // @downloadURL  https://raw.githubusercontent.com/Daregon-sh/veyra/refs/heads/codes/Veyra%20Visual%20Addon.js
 // @updateURL    https://raw.githubusercontent.com/Daregon-sh/veyra/refs/heads/codes/Veyra%20Visual%20Addon.js
 // @description  sidebars visual integration
@@ -10595,6 +10595,38 @@ document.head.appendChild(style);
 
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+    async function retryFetch(url, options, maxRetries = 3) {
+  let delay = 500;
+
+  for (let i = 0; i <= maxRetries; i++) {
+    try {
+      const res = await fetch(url, options);
+
+      if (res.status === 429) {
+        console.warn(`[QoL] 429 rate limit — retrying in ${delay}ms`);
+        await sleep(delay);
+        delay *= 2;
+        continue;
+      }
+
+      if (res.status >= 500) {
+        console.warn(`[QoL] Server ${res.status} — retrying in ${delay}ms`);
+        await sleep(delay);
+        delay *= 2;
+        continue;
+      }
+
+      return res;
+    } catch (e) {
+      if (i === maxRetries) throw e;
+      await sleep(delay);
+      delay *= 2;
+    }
+  }
+
+  throw new Error("Max retries exceeded");
+}
     function notifyStatusAndReload(statusBar, message, delay = 2000) {
   if (statusBar) {
     statusBar.textContent = message;
@@ -10866,130 +10898,141 @@ let autoUseStaminaPotion =
 
     let lastKnownStamina = null;
 
-    async function attackMonster(mid, staminaCost, retry = false) {
-        const form = new FormData();
+async function attackMonster(mid, staminaCost, attempt = 0) {
+  const MAX_ATTEMPTS = 3;
 
-        if (isDungeon) {
-            form.append("dgmid", mid);
-            form.append("instance_id", instanceId);
-        } else {
-            form.append("monster_id", mid);
-        }
+  const form = new FormData();
 
-
-        const skill = ATK_SKILLS[staminaCost];
-        if (!skill) {
-            throw new Error("Unknown stamina cost: " + staminaCost);
-        }
-
-        form.append("skill_id", skill.skillId);
-        form.append("stamina_cost", staminaCost);
-
-        const res = await fetch("damage.php", {
-            method: "POST",
-            credentials: "include",
-            body: form
-        });
-
-        // ✅ Handle server / edge failures FIRST
-if (!res.ok) {
-  // 429: rate limiting
-  if (res.status === 429) {
-    throw new Error("RATE_LIMIT");
+  if (isDungeon) {
+    form.append("dgmid", mid);
+    form.append("instance_id", instanceId);
+  } else {
+    form.append("monster_id", mid);
   }
 
-  // 520 / 502 / 503 / 504: server hiccup
-  if (res.status >= 500) {
-    console.warn(`[QoL] Server error ${res.status} — temporary failure`);
-    throw new Error("SERVER_OVERLOAD");
-  }
-}
+  const skill = ATK_SKILLS[staminaCost];
+  if (!skill) throw new Error("Unknown stamina cost");
 
-// ✅ Only parse JSON after we know response is OK
-let data;
-try {
-  data = await res.json();
-    /* ===================== UI LIVE UPDATE ===================== */
+  form.append("skill_id", skill.skillId);
+  form.append("stamina_cost", staminaCost);
 
-// ✅ stamina
-if (typeof data.stamina === "number") {
-  lastKnownStamina = data.stamina;
-  updateStaminaBar(data.stamina);
-}
-
-// ✅ HP (you already had this, keep it)
-if (data?.retaliation?.user_hp_after != null) {
-  updateHpBar(data.retaliation.user_hp_after);
-}
-
-// ✅ EXP
-if (typeof data.xp_delta === "number") {
-  updateExpBar(data.xp_delta);
-}
-
-} catch {
-  throw new Error("BAD_JSON");
-}
-
-        /* ===================== STAMINA ERROR HANDLING ===================== */
- if (!res.ok && data?.message?.toLowerCase().includes("not enough stamina")) {
-  if (!autoUseStaminaPotion) {
-    console.warn("[QoL] Not enough stamina — auto-use disabled");
-    throw new Error("Not enough stamina (auto-use disabled)");
+  let res;
+  try {
+    res = await retryFetch("damage.php", {
+      method: "POST",
+      credentials: "include",
+      body: form
+    });
+  } catch (e) {
+    console.warn("[QoL] Network failure");
+    if (attempt < MAX_ATTEMPTS) {
+      await sleep(400);
+      return attackMonster(mid, staminaCost, attempt + 1);
+    }
+    throw new Error("NETWORK_FAIL");
   }
 
-  if (retry) {
-    throw new Error("Stamina potion failed or no potion left");
+  let data;
+  try {
+    data = await res.json();
+  } catch {
+    if (attempt < MAX_ATTEMPTS) {
+      await sleep(300);
+      return attackMonster(mid, staminaCost, attempt + 1);
+    }
+    throw new Error("BAD_JSON");
   }
 
-  console.warn("[QoL] Server says: Not enough stamina — using potion");
+  const msg = (data?.message || "").toLowerCase();
+// 💀 PLAYER DEAD (server message)
+if (msg.includes("you are dead")) {
 
-  const healed = await useLargeStaminaPotion();
+  console.warn("[QoL] Player is dead — using HP potion");
+
+  const healed = await useFullHpPotion();
+
   if (!healed) {
-    throw new Error("Out of stamina and no potion available");
+    return { ok: false, skip: "dead_player" };
   }
 
   await sleep(400);
-  return attackMonster(mid, staminaCost, true);
+
+  // 🔁 retry attack after healing
+  return attackMonster(mid, staminaCost, attempt + 1);
 }
 
-        /* ===================== HP FAILSAFE ===================== */
-        if (data?.retaliation?.user_hp_after != null) {
-            updateHpBar(data.retaliation.user_hp_after);
+  // ✅ SUCCESS
+  if (data.status === "success") {
 
-            if (data.retaliation.user_hp_after <= 0) {
-                console.warn("[QoL] HP depleted — using potion");
-
-                const healed = await useFullHpPotion();
-                if (!healed) {
-                    throw new Error("Out of HP and no potion available");
-                }
-
-                await sleep(400);
-            }
-        }
-
-        /* ===================== STAMINA TRACKING ===================== */
-        if (typeof data.stamina === "number") {
-            lastKnownStamina = data.stamina;
-            //updateStaminaBar(data.stamina);
-        }
-
-        if (data.status !== "success") {
-            const msg = (data.message || "").toLowerCase();
-
-            // ✅ Soft-skip dead monsters
-            if (msg.includes("already dead")) {
-                console.warn(`[QoL] Skipping dead monster ${mid}`);
-                return false;
-            }
-
-            throw new Error(data.message || "Attack failed");
-        }
-
-        return true;
+    if (typeof data.stamina === "number") {
+      lastKnownStamina = data.stamina;
+      updateStaminaBar(data.stamina);
     }
-    /* ===================== Init ===================== */
+
+    if (data?.retaliation?.user_hp_after != null) {
+      updateHpBar(data.retaliation.user_hp_after);
+    }
+
+    if (typeof data.xp_delta === "number") {
+      updateExpBar(data.xp_delta);
+    }
+
+    return { ok: true };
+  }
+
+  // ❌ DEAD
+  if (msg.includes("already dead")) {
+    return { ok: false, skip: "dead" };
+  }
+
+  // ❌ LOCKED
+  if (msg.includes("cannot join") || msg.includes("other monsters")) {
+    return { ok: false, skip: "locked" };
+  }
+
+  // 🔁 REJOIN
+  if (msg.includes("inactivity")) {
+    return { ok: false, retry: "rejoin" };
+  }
+
+  // 🧪 STAMINA
+  if (msg.includes("not enough stamina")) {
+
+    if (!autoUseStaminaPotion) {
+      return { ok: false, skip: "stamina_disabled" };
+    }
+
+    if (attempt >= 1) {
+      return { ok: false, skip: "no_potions" };
+    }
+
+    const healed = await useLargeStaminaPotion();
+    if (!healed) {
+      return { ok: false, skip: "no_potions" };
+    }
+
+    await sleep(400);
+    return attackMonster(mid, staminaCost, attempt + 1);
+  }
+
+  // ❤️ HP FAILSAFE
+  if (data?.retaliation?.user_hp_after <= 0) {
+    const healed = await useFullHpPotion();
+    if (!healed) {
+      return { ok: false, skip: "dead_player" };
+    }
+
+    await sleep(400);
+  }
+
+  // 🔁 GENERIC RETRY
+  if (attempt < MAX_ATTEMPTS) {
+    await sleep(300);
+    return attackMonster(mid, staminaCost, attempt + 1);
+  }
+
+  return { ok: false, skip: "failed" };
+}    /* ===================== Init ===================== */
 
     function getWaveHostPanel() {
         // If official panel exists → use it
@@ -11466,7 +11509,42 @@ stamToggleWrap.append(
                 isDungeon ? await joinDungeonMonster(id) : await joinWaveMonster(id);
                 await sleep(150);
                try {
-  await attackMonster(id, stam);
+  const result = await attackMonster(id, stam);
+
+if (!result?.ok) {
+
+  // STOP LOOP
+  if (result.skip === "stamina_disabled" || result.skip === "no_potions") {
+    notifyStatusAndReload(
+      statusBar,
+      "⚠️ Not enough stamina",
+      2500
+    );
+    return;
+  }
+
+  // SKIP MONSTER
+  if (["dead", "locked", "failed", "dead_player"].includes(result.skip)) {
+    console.warn(`[QoL] Skipping ${id} (${result.skip})`);
+    continue;
+  }
+
+  // 🔁 REJOIN FIX
+  if (result.retry === "rejoin") {
+    await (isDungeon
+      ? joinDungeonMonster(id)
+      : joinWaveMonster(id));
+
+    await sleep(200);
+
+    const retryResult = await attackMonster(id, stam);
+
+    if (!retryResult?.ok) {
+      console.warn(`[QoL] Retry failed for ${id}`);
+    }
+  }
+}
+
 } catch (err) {
   if (
     err?.message?.includes("Not enough stamina") ||
@@ -11557,110 +11635,7 @@ function initGuildDungeonQoL(attempt = 0) {
 
 let lastKnownStamina = null;
 
-async function attackMonster(mid, staminaCost, retry = false) {
-  const form = new FormData();
 
-  if (isDungeon) {
-    form.append("dgmid", mid);
-    form.append("instance_id", instanceId);
-  } else {
-    form.append("monster_id", mid);
-  }
-
-const skill = ATK_SKILLS[staminaCost];
-if (!skill) {
-  throw new Error("Unknown stamina cost: " + staminaCost);
-}
-
-form.append("skill_id", skill.skillId);
-form.append("stamina_cost", staminaCost);
-
-  const res = await fetch("damage.php", {
-    method: "POST",
-    credentials: "include",
-    body: form
-  });
-
-// ✅ Handle server / edge failures FIRST
-if (!res.ok) {
-  // 429: rate limiting
-  if (res.status === 429) {
-    throw new Error("RATE_LIMIT");
-  }
-
-  // 520 / 502 / 503 / 504: server hiccup
-  if (res.status >= 500) {
-    console.warn(`[QoL] Server error ${res.status} — temporary failure`);
-    throw new Error("SERVER_OVERLOAD");
-  }
-}
-
-// ✅ Only parse JSON after we know response is OK
-let data;
-try {
-  data = await res.json();
-} catch {
-  throw new Error("BAD_JSON");
-}
-
-  /* ===================== STAMINA ERROR HANDLING ===================== */
-if (!res.ok && data?.message?.toLowerCase().includes("not enough stamina")) {
-  if (!autoUseStaminaPotion) {
-    console.warn("[QoL] Not enough stamina — auto-use disabled");
-    throw new Error("Not enough stamina (auto-use disabled)");
-  }
-
-  if (retry) {
-    throw new Error("Stamina potion failed or no potion left");
-  }
-
-  console.warn("[QoL] Server says: Not enough stamina — using potion");
-
-  const healed = await useLargeStaminaPotion();
-  if (!healed) {
-    throw new Error("Out of stamina and no potion available");
-  }
-
-  await sleep(400);
-  return attackMonster(mid, staminaCost, true);
-}
-
-  /* ===================== HP FAILSAFE ===================== */
-  if (data?.retaliation?.user_hp_after != null) {
-    updateHpBar(data.retaliation.user_hp_after);
-
-    if (data.retaliation.user_hp_after <= 0) {
-      console.warn("[QoL] HP depleted — using potion");
-
-      const healed = await useFullHpPotion();
-      if (!healed) {
-        throw new Error("Out of HP and no potion available");
-      }
-
-      await sleep(400);
-    }
-  }
-
-  /* ===================== STAMINA TRACKING ===================== */
-  if (typeof data.stamina === "number") {
-    lastKnownStamina = data.stamina;
-    //updateStaminaBar(data.stamina);
-  }
-
-if (data.status !== "success") {
-  const msg = (data.message || "").toLowerCase();
-
-  // ✅ Soft-skip dead monsters (dungeon cleanup)
-  if (msg.includes("already dead")) {
-    console.warn(`[QoL] Skipping dead monster ${mid}`);
-    return false;
-  }
-
-  throw new Error(data.message || "Attack failed");
-}
-
-  return true;
-}
   /* ===================== Panel Target ===================== */
   const leftPanels = document.querySelectorAll(".grid > div:first-child .panel");
   const monstersPanel = leftPanels[1];
@@ -12029,7 +12004,39 @@ stamToggleWrap.append(
               await joinDungeonMonster(selectedMonsterIds[i]);
               await sleep(150);
             try {
-  await attackMonster(selectedMonsterIds[i], stam);
+ const id = selectedMonsterIds[i];
+const result = await attackMonster(id, stam);
+
+if (!result?.ok) {
+
+  // STOP LOOP
+  if (result.skip === "stamina_disabled" || result.skip === "no_potions") {
+    notifyStatusAndReload(
+      statusBar,
+      "⚠️ Not enough stamina",
+      2500
+    );
+    return;
+  }
+
+  // SKIP MONSTER
+  if (["dead", "locked", "failed", "dead_player"].includes(result.skip)) {
+    console.warn(`[QoL] Skipping ${id} (${result.skip})`);
+    continue;
+  }
+
+  // 🔁 REJOIN
+  if (result.retry === "rejoin") {
+    await joinDungeonMonster(id);
+    await sleep(200);
+
+    const retryResult = await attackMonster(id, stam);
+
+    if (!retryResult?.ok) {
+      console.warn(`[QoL] Retry failed for ${id}`);
+    }
+  }
+}
 } catch (err) {
   if (
     err?.message?.includes("Not enough stamina") ||
@@ -14487,9 +14494,9 @@ function findWrapper() {
   </div>
 
   <!-- COLLAPSIBLE CONTENT -->
-  <div id="caf-content" style="padding:10px;">
+  <div id="caf-content">
 
-    <!-- EVERYTHING THAT WAS ALREADY INSIDE GOES HERE -->
+  <div id="caf-settings" style="padding:10px;">
 
 <div class="caf-dd-wrap" style="position:relative;margin-bottom:10px;">
   <button id="caf-monster-btn" class="qol-btn secondary" style="width:260px">
@@ -14607,7 +14614,9 @@ function findWrapper() {
            style="display:flex;flex-direction:column;gap:8px;flex-wrap: wrap;align-content: flex-start;">
       </div>
     </div>
+</div>
 
+ <div id="caf-controls" style="padding:10px;">
   <div style="display:flex;gap:8px;">
     <button id="caf-start" class="qol-btn primary">▶ Start</button>
     <button id="caf-pause" class="qol-btn secondary">⏸ Pause</button>
@@ -14638,7 +14647,7 @@ function findWrapper() {
 
 
             // Collapse by default
-            const content = root.querySelector('#caf-content');
+            const content = root.querySelector('#caf-settings');
             const icon = root.querySelector('#caf-toggle-icon');
 
             if (content && icon) {
@@ -14764,7 +14773,7 @@ function findWrapper() {
 
         function enableCollapse() {
             const header = document.getElementById('caf-header');
-            const content = document.getElementById('caf-content');
+            const content = document.getElementById('caf-settings');
             const icon = document.getElementById('caf-toggle-icon');
 
             if (!header || !content) return;
