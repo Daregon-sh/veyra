@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Veyra Visual Addon
 // @namespace    https://github.com/Daregon-sh/veyra
-// @version      2.18.8
+// @version      2.18.9
 // @downloadURL  https://raw.githubusercontent.com/Daregon-sh/veyra/refs/heads/codes/Veyra%20Visual%20Addon.js
 // @updateURL    https://raw.githubusercontent.com/Daregon-sh/veyra/refs/heads/codes/Veyra%20Visual%20Addon.js
 // @description  sidebars visual integration
@@ -8452,6 +8452,11 @@ function escapeHtml(str) {
 
     const GUILD_URL = '/guild_members.php';
 
+    const FORCE_MATCH_NAMES = new Set([
+        "How to make your game less playable"
+    ]);
+
+
     // ==== Styles ==============================================================
     function ensureStyles() {
         if (document.getElementById('guild-highlight-style')) return;
@@ -8598,50 +8603,98 @@ function escapeHtml(str) {
     }
 
     // Perform highlighting/insertion in a node
-    function highlightNode(node, re) {
-        if (!re) return;
+function highlightNode(node, re) {
+    if (!re) return;
 
-        if (node.nodeType === Node.TEXT_NODE) {
-            const text = node.nodeValue;
-            if (!text) return;
+if (node.nodeType === Node.TEXT_NODE) {
+    const text = node.nodeValue;
+    if (!text) return;
 
-            const testText = normalizeForMatch(text);
-            if (!re.test.test(testText)) return;
+    const trimmed = text.trim();
+    if (!trimmed) return;
 
-            const wrapper = document.createElement('span');
+    const parent = node.parentElement;
 
-            if (re.mode === 'lookbehind') {
-                // Boundaries are zero-width: replace exact match
-                wrapper.innerHTML = text.replace(re.replace, match => decorateInsert(match));
-            } else {
-                // Fallback (no lookbehind): union includes left boundary inside the overall match.
-                wrapper.innerHTML = text.replace(re.replace, function() {
-                    const args = Array.from(arguments);
-                    const whole = args[0];
-                    const offset = args[args.length - 2];
+// ✅ Check forced names FIRST (override all filters)
+for (const name of FORCE_MATCH_NAMES) {
+    if (text.includes(name)) {
+        const wrapper = document.createElement('span');
+        wrapper.innerHTML = text.replace(
+            new RegExp(escapeRegExp(name), 'gi'),
+            match => decorateInsert(match)
+        );
 
-                    // If the match starts with a non-word boundary char, keep it outside our decorated block.
-                    let leadingBoundary = '';
-                    let core = whole;
-                    if (core.length > 0 && !/[\p{L}\p{N}_]/u.test(core[0])) {
-                        leadingBoundary = core[0];
-                        core = core.slice(1);
-                    }
-                    return leadingBoundary + decorateInsert(core);
-                });
-            }
-
-            if (node.parentNode) node.parentNode.replaceChild(wrapper, node);
-
-        } else if (node.nodeType === Node.ELEMENT_NODE) {
-            const el = node;
-            if (shouldSkipElement(el)) return;
-
-            const children = Array.from(el.childNodes);
-            for (const child of children) highlightNode(child, re);
-        }
+        if (node.parentNode) node.parentNode.replaceChild(wrapper, node);
+        return;
     }
 
+    // ✅ NEW: handle split text across sibling nodes
+    const parentEl = node.parentElement;
+    if (parentEl) {
+        const fullText = parentEl.textContent;
+
+        if (fullText.includes(name)) {
+            // Only run once per parent to avoid duplication
+            if (parentEl.classList.contains('guild-hl')) return;
+
+            const html = parentEl.innerHTML;
+            parentEl.innerHTML = html.replace(
+                new RegExp(escapeRegExp(name), 'gi'),
+                match => decorateInsert(match)
+            );
+
+            parentEl.classList.add('guild-hl');
+            return;
+        }
+    }
+}
+
+    // ✅ Skip UI / descriptive containers
+    if (parent && parent.closest('.passive, .skill-desc, .tag')) {
+        return;
+    }
+
+    const wordCount = trimmed.split(/\s+/).length;
+
+    // ✅ Skip long/sentence-like text
+    if (trimmed.length > 60 || wordCount > 6) return;
+
+    const testText = normalizeForMatch(text);
+    if (!re.test.test(testText)) return;
+
+    const wrapper = document.createElement('span');
+
+    if (re.mode === 'lookbehind') {
+        wrapper.innerHTML = text.replace(re.replace, match => decorateInsert(match));
+    } else {
+        wrapper.innerHTML = text.replace(re.replace, function () {
+            const args = Array.from(arguments);
+            const whole = args[0];
+
+            let leadingBoundary = '';
+            let core = whole;
+
+            if (core.length > 0 && !/[\p{L}\p{N}_]/u.test(core[0])) {
+                leadingBoundary = core[0];
+                core = core.slice(1);
+            }
+
+            return leadingBoundary + decorateInsert(core);
+        });
+    }
+
+    if (node.parentNode) node.parentNode.replaceChild(wrapper, node);
+}
+ else if (node.nodeType === Node.ELEMENT_NODE) {
+        const el = node;
+        if (shouldSkipElement(el)) return;
+
+        const children = Array.from(el.childNodes);
+        for (const child of children) {
+            highlightNode(child, re);
+        }
+    }
+}
     // ==== Init ================================================================
     async function init() {
         try {
@@ -10962,28 +11015,71 @@ if (msg.includes("you are dead")) {
 }
 
   // ✅ SUCCESS
-  if (data.status === "success") {
+if (data.status === "success") {
 
-    if (typeof data.stamina === "number") {
-      lastKnownStamina = data.stamina;
-      updateStaminaBar(data.stamina);
-    }
+  // ✅ Extract damage + monster name
+  let damage = null;
+  let monsterName = null;
 
-    if (data?.retaliation?.user_hp_after != null) {
-      updateHpBar(data.retaliation.user_hp_after);
-    }
-
-    if (typeof data.xp_delta === "number") {
-      updateExpBar(data.xp_delta);
-    }
-
-    return { ok: true };
+  // OPTION 1 (BEST): use logs
+  if (data.logs && data.logs.length) {
+    damage = data.logs[0].DAMAGE;
   }
+
+  // OPTION 2 fallback: parse message
+  if (!damage && data.message) {
+    const dmgMatch = data.message.match(/dealt <strong>([\d,]+)/i);
+    if (dmgMatch) damage = dmgMatch[1];
+
+    const nameMatch = data.message.match(/to <strong>(.*?)</i);
+    if (nameMatch) monsterName = nameMatch[1];
+  }
+
+  // fallback name from DOM if needed
+  if (!monsterName) {
+    const card = document.querySelector(
+      `.monster-card[data-monster-id="${mid}"]`
+    );
+    monsterName = card?.dataset.name || "Unknown";
+  }
+
+  if (typeof data.stamina === "number") {
+    lastKnownStamina = data.stamina;
+    updateStaminaBar(data.stamina);
+  }
+
+  if (data?.retaliation?.user_hp_after != null) {
+    updateHpBar(data.retaliation.user_hp_after);
+  }
+
+  if (typeof data.xp_delta === "number") {
+    updateExpBar(data.xp_delta);
+  }
+
+  return {
+    ok: true,
+    damage,
+    monsterName
+  };
+}
 
   // ❌ DEAD
-  if (msg.includes("already dead")) {
-    return { ok: false, skip: "dead" };
-  }
+if (msg.includes("already dead")) {
+
+  let monsterName = null;
+
+  const card = document.querySelector(
+    `.monster-card[data-monster-id="${mid}"]`
+  );
+  monsterName = card?.dataset.name || "Unknown";
+
+  return {
+    ok: false,
+    skip: "dead",
+    monsterName,
+    message: "Already dead"
+  };
+}
 
   // ❌ LOCKED
   if (msg.includes("cannot join") || msg.includes("other monsters")) {
@@ -11141,7 +11237,7 @@ if (waveSection === "dead") {
 
     /* ===================== DROPDOWN ===================== */
     const wrapper = document.createElement("div");
-    wrapper.style.cssText = "position:relative;display:inline-block;z-index:99999;";
+    wrapper.style.cssText = "position:relative;display:inline-block;z-index:9998;";
 
     const dropBtn = document.createElement("button");
     dropBtn.innerHTML = `
@@ -11504,12 +11600,22 @@ stamToggleWrap.append(
 
             for (let i = 0; i < selectedMonsterIds.length; i++) {
                 const id = selectedMonsterIds[i];
-                statusBar.textContent =
-                    `⏳ Attacking ${i + 1}/${selectedMonsterIds.length}`;
+                //statusBar.textContent =
+                //    `⏳ Attacking ${i + 1}/${selectedMonsterIds.length}...`;
                 isDungeon ? await joinDungeonMonster(id) : await joinWaveMonster(id);
                 await sleep(150);
                try {
-  const result = await attackMonster(id, stam);
+const result = await attackMonster(id, stam);
+
+if (result?.ok) {
+  const dmgText = result.damage
+    ? Number(result.damage).toLocaleString()
+    : "?";
+
+  statusBar.textContent =
+    `⚔️ Attacking ${i + 1}/${selectedMonsterIds.length} ` +
+    `${result.monsterName} — 💥 ${dmgText}`;
+}
 
 if (!result?.ok) {
 
@@ -11524,10 +11630,16 @@ if (!result?.ok) {
   }
 
   // SKIP MONSTER
-  if (["dead", "locked", "failed", "dead_player"].includes(result.skip)) {
-    console.warn(`[QoL] Skipping ${id} (${result.skip})`);
-    continue;
+if (["dead", "locked", "failed", "dead_player"].includes(result.skip)) {
+
+  if (result.skip === "dead") {
+    statusBar.textContent =
+      `☠️ ${i + 1}/${selectedMonsterIds.length} ${result.monsterName} — already dead`;
   }
+
+  console.warn(`[QoL] Skipping ${id} (${result.skip})`);
+  continue;
+}
 
   // 🔁 REJOIN FIX
   if (result.retry === "rejoin") {
