@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Veyra Visual Addon
 // @namespace    https://github.com/Daregon-sh/veyra
-// @version      2.18.9
+// @version      2.19.1
 // @downloadURL  https://raw.githubusercontent.com/Daregon-sh/veyra/refs/heads/codes/Veyra%20Visual%20Addon.js
 // @updateURL    https://raw.githubusercontent.com/Daregon-sh/veyra/refs/heads/codes/Veyra%20Visual%20Addon.js
 // @description  sidebars visual integration
@@ -6133,6 +6133,52 @@ function initNavOrderUI({
     }
 })();
 
+//Gold Gems value formater
+(function() {
+function formatWithAria(valueEl) {
+    const raw = valueEl.textContent.trim();
+
+    // Normalize → full number
+    let num = raw.replace(/,/g, '');
+    const match = num.match(/([\d.]+)([KMBT]?)/i);
+    if (!match) return;
+
+    let n = parseFloat(match[1]);
+    const suffix = match[2]?.toUpperCase() || '';
+
+    const multipliers = { '':1, K:1e3, M:1e6, B:1e9, T:1e12 };
+    n *= multipliers[suffix] || 1;
+
+    const full = Math.round(n).toLocaleString();
+
+    let compact;
+    if (n >= 1e12) compact = (n / 1e12).toFixed(1) + 'T';
+    else if (n >= 1e9) compact = (n / 1e9).toFixed(1) + 'B';
+    else if (n >= 1e6) compact = (n / 1e6).toFixed(1) + 'M';
+    else if (n >= 1e3) compact = Math.round(n).toLocaleString();
+    else compact = n.toString();
+
+    compact = compact.replace(/\.?0+$/, '');
+
+    // ✅ Visual
+    valueEl.textContent = compact;
+
+    // ✅ Accessibility + hover
+    valueEl.setAttribute('aria-label', full);
+    valueEl.setAttribute('title', full);
+}
+document.querySelectorAll('.gtb-stat').forEach(stat => {
+    const label = stat.querySelector('.gtb-label')?.textContent?.trim();
+    const valueEl = stat.querySelector('.gtb-value');
+
+    if (!valueEl) return;
+
+    if (label === 'Gold' || label === 'Gems') {
+        formatWithAria(valueEl);
+    }
+});
+})();
+
 // to hide instajoin btn
 (function() {
     'use strict';
@@ -6386,7 +6432,6 @@ function escapeHtml(str) {
 //join timed mobs from the top of the page
 (function() {
     'use strict';
-
     /********************
      * Helpers
      ********************/
@@ -6403,13 +6448,75 @@ function escapeHtml(str) {
         const target = norm(autoSummonName);
         if (!target) return null;
 
-        // Match .monster-card[data-name="..."]
+        const shortTarget = target.split(/[,:\-–—]/)[0].trim();
         const cards = document.querySelectorAll('.monster-card[data-name]');
+
         for (const card of cards) {
             const dn = norm(card.getAttribute('data-name'));
-            if (dn === target) return card;
+            const shortDn = dn.split(/[,:\-–—]/)[0].trim();
+
+            let isMatch = false;
+            let isPhase2 = false;
+
+            if (dn === target) {
+                isMatch = true;
+            } else if (shortDn === shortTarget) {
+                isMatch = true;
+                isPhase2 = true;
+            } else if (
+                dn.includes(target) ||
+                target.includes(dn) ||
+                shortDn.includes(shortTarget) ||
+                shortTarget.includes(shortDn)
+            ) {
+                isMatch = true;
+                isPhase2 = true;
+            }
+
+            if (!isMatch) continue;
+
+            return {
+                card,
+                bossId: card.dataset.monsterId, // ✅ HERE
+                isPhase2
+            };
         }
+
         return null;
+    }
+
+    async function fetchAutoDieTime(bossId) {
+        try {
+            const res = await fetch(`/battle.php?id=${bossId}`, {
+                credentials: 'include'
+            });
+            const html = await res.text();
+
+            const doc = new DOMParser().parseFromString(html, 'text/html');
+            const timerEl = doc.querySelector('#autoDieTimer');
+
+            if (!timerEl) return null;
+
+            return timerEl.textContent.trim(); // e.g. "04:02:32"
+        } catch (e) {
+            console.warn('[TM] Failed to fetch auto-die timer', e);
+            return null;
+        }
+    }
+
+    function ensureAutoDieSlot(autoCard) {
+        let el = autoCard.querySelector('.tm-auto-die');
+        if (el) return el;
+
+        el = document.createElement('div');
+        el.className = 'tm-auto-die';
+        el.style.marginTop = '4px';
+        el.style.fontWeight = '700';
+        el.style.color = '#e6e9ff';
+        el.textContent = '⏳ Auto-die: …';
+
+        autoCard.querySelector('.auto-summon-meta')?.appendChild(el);
+        return el;
     }
 
     function clickJoinOrContinue(monsterCard) {
@@ -6479,61 +6586,188 @@ function escapeHtml(str) {
         document.head.appendChild(style);
     }
 
-    function enhance() {
-        injectStylesOnce();
 
-        // 🚫 Skip if toggle button indicates "Show Alive monsters"
-        if (shouldSkipBecauseToggle()) return;
-
-        const autoCards = document.querySelectorAll('.auto-summon-card');
-        for (const autoCard of autoCards) {
-            const nameEl = autoCard.querySelector('.auto-summon-name');
-            const statusEl = autoCard.querySelector('.auto-summon-status');
-
-            if (!nameEl || !statusEl) continue;
-
-            // Filter: only if status says "Currently alive"
-            if (!isCurrentlyAlive(statusEl)) continue;
-
-            // Avoid duplicates
-            if (autoCard.querySelector('.tm-summon-action-btn')) continue;
-
-            const autoName = nameEl.textContent;
-            const monsterCard = findMatchingMonsterCardByName(autoName);
-            if (!monsterCard) continue;
-
-            const wrap = document.createElement('span');
-            wrap.className = 'tm-summon-action-wrap';
-
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.className = 'tm-summon-action-btn';
-            btn.textContent = 'Join';
-
-            btn.addEventListener('click', (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-
-                btn.disabled = true;
-
-                const res = clickJoinOrContinue(monsterCard);
-                if (!res.ok) {
-                    console.warn('[TM] No .join-btn or .continue-btn found for:', autoName);
-                    btn.disabled = false;
-                    return;
-                }
-
-                btn.textContent = (res.mode === 'continue') ? 'Continue' : 'Join';
-
-                setTimeout(() => {
-                    btn.disabled = false;
-                }, 1200);
-            });
-
-            wrap.appendChild(btn);
-            statusEl.insertAdjacentElement('afterend', wrap);
-        }
+    function secondsUntil(ts) {
+        const now = Math.floor(Date.now() / 1000);
+        return Math.max(0, ts - now);
     }
+
+    function formatHMS(sec) {
+        sec = Math.max(0, sec);
+        const h = String(Math.floor(sec / 3600)).padStart(2, '0');
+        const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
+        const s = String(sec % 60).padStart(2, '0');
+        return `${h}:${m}:${s}`;
+    }
+
+    function parseHoursFromAutoSummon(autoCard) {
+        const sub = autoCard.querySelector('.auto-summon-sub');
+        if (!sub) return null;
+
+        const text = sub.textContent.toLowerCase();
+
+        const cycleMatch = text.match(/cycle:\s*(\d+)\s*h/);
+        const dieMatch   = text.match(/auto-die:\s*(\d+)\s*h/);
+
+        if (!cycleMatch || !dieMatch) return null;
+
+        return {
+            cycleH: Number(cycleMatch[1]),
+            dieH: Number(dieMatch[1])
+        };
+    }
+
+    function startAutoDieCountdown(el, seconds) {
+        if (!el || seconds == null) return;
+
+        // prevent multiple timers
+        if (el._tmTimer) {
+            clearInterval(el._tmTimer);
+        }
+
+        let remaining = seconds;
+
+        el.textContent = `⏳ Auto-die: ${formatHMS(remaining)}`;
+
+        el._tmTimer = setInterval(() => {
+            remaining--;
+
+            if (remaining <= 0) {
+                clearInterval(el._tmTimer);
+                el.textContent = '💀 Auto-die: expired';
+                el.style.color = '#ff6b6b';
+                return;
+            }
+
+            el.textContent = `⏳ Auto-die: ${formatHMS(remaining)}`;
+
+            // optional warning color
+            if (remaining < 3600) {
+                el.style.color = '#f39c12'; // < 1h
+            }
+            if (remaining < 300) {
+                el.style.color = '#ff6b6b'; // < 5m
+            }
+        }, 1000);
+    }
+
+    function enhance() {
+    injectStylesOnce();
+
+    // 🚫 Skip if toggle button indicates "Show Alive monsters"
+    if (shouldSkipBecauseToggle()) return;
+
+    const ONE_DAY = 24 * 60 * 60;
+
+    const autoCards = document.querySelectorAll('.auto-summon-card');
+    for (const autoCard of autoCards) {
+        const nameEl = autoCard.querySelector('.auto-summon-name');
+        const statusEl = autoCard.querySelector('.auto-summon-status');
+
+        if (!nameEl || !statusEl) continue;
+        if (!isCurrentlyAlive(statusEl)) continue;
+
+        // avoid duplicate injection
+        if (autoCard.querySelector('.tm-summon-action-btn')) continue;
+
+        const autoName = nameEl.textContent.trim();
+
+        const match = findMatchingMonsterCardByName(autoName);
+        if (!match) continue;
+
+        const {
+            card: monsterCard,
+            isPhase2
+        } = match;
+
+        const nextTs = Number(autoCard.dataset.nextTs);
+        const expireTs = Number(monsterCard.dataset.expire);
+
+        /* --------------------------
+         * Join / Continue button
+         * -------------------------- */
+        const wrap = document.createElement('span');
+        wrap.className = 'tm-summon-action-wrap';
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'tm-summon-action-btn';
+        btn.textContent = isPhase2 ? 'Join Phase 2' : 'Join';
+
+        btn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+
+            btn.disabled = true;
+
+            const res = clickJoinOrContinue(monsterCard);
+            if (!res.ok) {
+                console.warn('[TM] No join/continue button found for:', autoName);
+                btn.disabled = false;
+                return;
+            }
+
+            btn.textContent =
+                res.mode === 'continue'
+                    ? 'Continue'
+                    : (isPhase2 ? 'Join Phase 2' : 'Join');
+
+            setTimeout(() => {
+                btn.disabled = false;
+            }, 1200);
+        });
+
+        wrap.appendChild(btn);
+        statusEl.insertAdjacentElement('afterend', wrap);
+
+        /* --------------------------
+         * Auto‑die countdown
+         * -------------------------- */
+        let autoDieEl = autoCard.querySelector('.tm-auto-die');
+        if (!autoDieEl) {
+            autoDieEl = document.createElement('div');
+            autoDieEl.className = 'tm-auto-die';
+            autoDieEl.style.marginTop = '4px';
+            autoDieEl.style.fontWeight = '700';
+            autoDieEl.style.color = '#e6e9ff';
+            autoCard.querySelector('.auto-summon-meta')?.appendChild(autoDieEl);
+        }
+
+        if (!nextTs) {
+            autoDieEl.textContent = '⏳ Auto-die: unknown';
+            continue;
+        }
+
+let remaining = Math.max(0, Math.floor(nextTs - Date.now() / 1000));
+
+/* --------------------------------
+ * Cycle / Auto‑die adjustment
+ * -------------------------------- */
+const timing = parseHoursFromAutoSummon(autoCard);
+
+if (timing) {
+    const offsetSeconds = Math.max(
+        0,
+        (timing.cycleH - timing.dieH) * 3600
+    );
+
+    remaining -= offsetSeconds;
+}
+
+// ✅ Phase 2 safety (48h → 24h fallback)
+if (!timing && isPhase2) {
+    remaining -= ONE_DAY;
+}
+
+        if (remaining <= 0) {
+            autoDieEl.textContent = '💀 Auto-die: expired';
+            autoDieEl.style.color = '#ff6b6b';
+            continue;
+        }
+
+        startAutoDieCountdown(autoDieEl, remaining);
+    }
+}
 
     function shouldSkipBecauseToggle() {
         const btn = document.querySelector('#toggleDeadBtn');
@@ -10857,7 +11091,6 @@ document.head.appendChild(style);
 
         if (!topText || !fill) return;
 
-        // Extract numbers: "83,802,851 / 101,203,700"
         const match = topText.textContent.match(/([\d,]+)\s*\/\s*([\d,]+)/);
         if (!match) return;
 
@@ -10868,8 +11101,10 @@ document.head.appendChild(style);
 
         current += xpDelta;
 
-        // Cap at max (avoid overflow issues)
-        if (current > max) current = max;
+        // ✅ FIX: rollover instead of clamp
+        if (current >= max) {
+            current = current - max; // ✅ level up → reset bar
+        }
 
         const percent = (current / max) * 100;
 
@@ -12441,11 +12676,40 @@ ${(() => {
       const matches = bosses.filter(b => b.gate === gate && b.wave === wave);
       if (!matches.length) return;
 
-      const box = document.createElement('div');
-      box.style.marginTop = '6px';
-      box.style.paddingTop = '6px';
-      box.style.borderTop = '1px solid rgba(255,255,255,0.25)';
-      box.style.fontSize = '11px';
+      // === Wrapper ===
+const wrapper = document.createElement('div');
+wrapper.style.marginTop = '6px';
+wrapper.style.borderTop = '1px solid rgba(255,255,255,0.25)';
+wrapper.style.fontSize = '11px';
+
+// === Header (clickable) ===
+const toggle = document.createElement('div');
+toggle.style.cursor = 'pointer';
+toggle.style.padding = '4px 0';
+toggle.style.color = '#a78bfa';
+toggle.style.fontWeight = '600';
+
+// Default state (collapsed)
+let isOpen = false;
+
+const d = getDisplayGateWave(gate, wave);
+toggle.textContent = `▶ Gate ${d.gate} • Wave ${d.wave}`;
+
+// === Content container ===
+const content = document.createElement('div');
+content.style.display = 'none';
+content.style.paddingTop = '4px';
+
+// Toggle logic
+toggle.onclick = () => {
+  isOpen = !isOpen;
+  content.style.display = isOpen ? 'block' : 'none';
+  toggle.textContent = `${isOpen ? '▼' : '▶'} Gate ${d.gate} • Wave ${d.wave}`;
+};
+
+// Append header
+wrapper.appendChild(toggle);
+wrapper.appendChild(content);
 
       matches.forEach(b => {
         const row = document.createElement('div');
@@ -12462,15 +12726,17 @@ ${(() => {
   `;
         })()}
         `;
-        box.appendChild(row);
+        content.appendChild(row);
       });
 
-      link.parentElement.appendChild(box);
+      link.parentElement.appendChild(wrapper);
       link.dataset.bossInjected = 'true';
     });
   }
 
   /* ================= WAIT FOR MENU ================= */
+
+
 
   function waitForMenu(bosses) {
     const obs = new MutationObserver(() => {
