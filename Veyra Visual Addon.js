@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Veyra Visual Addon
 // @namespace    https://github.com/Daregon-sh/veyra
-// @version      2.19.1
+// @version      2.19.2
 // @downloadURL  https://raw.githubusercontent.com/Daregon-sh/veyra/refs/heads/codes/Veyra%20Visual%20Addon.js
 // @updateURL    https://raw.githubusercontent.com/Daregon-sh/veyra/refs/heads/codes/Veyra%20Visual%20Addon.js
 // @description  sidebars visual integration
@@ -1188,7 +1188,7 @@ function modifySideNav() {
 
         // MERCHANT — Black merchant
         const merchantSectionHTML = `
-      <div style="margin-left: 15px; padding: 6px; background: rgba(30, 30, 46, 0.5); border-radius: 4px; border-left: 2px solid #0f0f0f;">
+      <div style="margin-left: 15px; margin-top:0; padding: 6px; background: rgba(30, 30, 46, 0.5); border-radius: 4px; border-left: 2px solid #e59f5a;">
         <a style="text-decoration: none; color:white;" href="black_merchant.php">
 		  <span class="side-icon">⛃</span>
           <span class="side-label">Black merchant</span>
@@ -1255,12 +1255,19 @@ function modifySideNav() {
     `;
       // Classes — Secondary Classes
         const classesSectionHTML = `
-      <div style="margin-left: 15px; padding: 6px; background: rgba(30, 30, 46, 0.5); border-radius: 4px; border-left: 2px solid #0f0f0f;">
+      <div style="margin-left: 15px; margin-top:0; padding: 6px; background: rgba(30, 30, 46, 0.5); border-radius: 4px; border-left: 2px solid #e59f5a;">
         <a style="text-decoration: none; color:white;" href="secondary_classes.php">
 		  <span class="side-icon">☾</span>
           <span class="side-label">Secondary Class</span>
         </a>
       </div>
+      <div style="margin-left: 15px; margin-top:6px; padding: 6px; background: rgba(30, 30, 46, 0.5); border-radius: 4px; border-left: 2px solid #e59f5a;">
+        <a style="text-decoration: none; color:white;" href="advanced_classes.php">
+		  <span class="side-icon" style="color:yellow;" >✦</span>
+          <span class="side-label">Advanced Class</span>
+        </a>
+      </div>
+
     `;
 
 
@@ -6504,6 +6511,25 @@ function escapeHtml(str) {
         }
     }
 
+    async function fetchYourDamage(bossId) {
+        try {
+            const res = await fetch(`/battle.php?id=${bossId}`, {
+                credentials: 'include'
+            });
+            const html = await res.text();
+
+            const doc = new DOMParser().parseFromString(html, 'text/html');
+            const dmgEl = doc.querySelector('#yourDamageValue');
+
+            if (!dmgEl) return null;
+
+            return dmgEl.textContent.trim(); // e.g. "1,582,896,546"
+        } catch (e) {
+            console.warn('[TM] Failed to fetch damage for boss', bossId, e);
+            return null;
+        }
+    }
+
     function ensureAutoDieSlot(autoCard) {
         let el = autoCard.querySelector('.tm-auto-die');
         if (el) return el;
@@ -6518,6 +6544,21 @@ function escapeHtml(str) {
         autoCard.querySelector('.auto-summon-meta')?.appendChild(el);
         return el;
     }
+
+    function ensureDamageSlot(autoCard) {
+    let el = autoCard.querySelector('.tm-your-damage');
+    if (el) return el;
+
+    el = document.createElement('div');
+    el.className = 'tm-your-damage';
+    el.style.marginTop = '2px';
+    el.style.fontWeight = '700';
+    el.style.color = '#9bd6ff';
+    el.textContent = '🩸 Damage Dealt: …';
+
+    autoCard.querySelector('.auto-summon-meta')?.appendChild(el);
+    return el;
+}
 
     function clickJoinOrContinue(monsterCard) {
         if (!monsterCard) return false;
@@ -6585,7 +6626,6 @@ function escapeHtml(str) {
     `;
         document.head.appendChild(style);
     }
-
 
     function secondsUntil(ts) {
         const now = Math.floor(Date.now() / 1000);
@@ -6766,6 +6806,24 @@ if (!timing && isPhase2) {
         }
 
         startAutoDieCountdown(autoDieEl, remaining);
+
+        /* --------------------------
+         * Your damage dealt
+         * -------------------------- */
+        const dmgEl = ensureDamageSlot(autoCard);
+
+        // prevent refetching
+        if (!dmgEl.dataset.loaded && match.bossId) {
+            dmgEl.dataset.loaded = '1';
+
+            fetchYourDamage(match.bossId).then(dmg => {
+                if (dmg) {
+                    dmgEl.textContent = `🩸 Damage Dealt: ${dmg}`;
+                } else {
+                    dmgEl.textContent = '🩸 Damage Dealt: 0';
+                }
+            });
+        }
     }
 }
 
@@ -6776,6 +6834,8 @@ if (!timing && isPhase2) {
         const txt = norm(btn.textContent);
         return txt.includes('show alive monsters');
     }
+
+
 
     /********************
      * Run + Observe
@@ -8826,15 +8886,27 @@ if (!timing && isPhase2) {
     // Decorate a matched chunk:
     // - If it already contains "AHAB" (any case), color just those letters red.
     // - Else, prepend a red "[AHAB]" plus a space, then the original chunk.
-    function decorateInsert(core) {
-        if (/AHAB/i.test(core)) {
-            return `<span class="guild-hl">${
-        core.replace(/AHAB/gi, m => `<span class="guild-ahab">${m}</span>`)
-      }</span>`;
-        }
-        // No "AHAB" found: prepend red [AHAB]
-        return `<span class="guild-hl"><span class="guild-ahab-tag">[AHAB]</span> ${core}</span>`;
+
+const NO_PREFIX_EXCEPTIONS = new Set([
+    "Berserker - Rage"
+]);
+
+function decorateInsert(core) {
+    const normalized = core.trim().toLowerCase();
+
+    if (NO_PREFIX_EXCEPTIONS.has(normalized)) {
+        return `<span class="guild-hl">${core}</span>`;
     }
+
+    if (/AHAB/i.test(core)) {
+        return `<span class="guild-hl">${
+            core.replace(/AHAB/gi, m => `<span class="guild-ahab">${m}</span>`)
+        }</span>`;
+    }
+
+    return `<span class="guild-hl"><span class="guild-ahab-tag">[AHAB]</span> ${core}</span>`;
+}
+
 
     // Perform highlighting/insertion in a node
 function highlightNode(node, re) {
@@ -8848,6 +8920,21 @@ if (node.nodeType === Node.TEXT_NODE) {
     if (!trimmed) return;
 
     const parent = node.parentElement;
+
+// Skip advanced resource labels (e.g. Rage)
+
+if (
+    parent &&
+    (
+        parent.id === 'advancedResourceLabel' ||
+        parent.closest('#advancedResourceLabel') ||
+        parent.classList.contains('logLine') ||
+        parent.closest('.logLine')
+    )
+) {
+    return;
+}
+
 
 // ✅ Check forced names FIRST (override all filters)
 for (const name of FORCE_MATCH_NAMES) {
@@ -8895,6 +8982,11 @@ for (const name of FORCE_MATCH_NAMES) {
 
     const testText = normalizeForMatch(text);
     if (!re.test.test(testText)) return;
+
+// Don't highlight "Rage" inside "Berserker - Rage"
+if (/berserker\s*-\s*rage/i.test(testText)) {
+    return;
+}
 
     const wrapper = document.createElement('span');
 
@@ -10759,6 +10851,8 @@ const style = document.createElement("style");
     if (!vv.isOn('qol_revamp')) return;
   "use strict";
 let QOL_ABORTED = false;
+let QOL_INITIALIZED = false;
+
 if (document.getElementById("wave-addon-filter-panel")) {
   console.log("[QoL] Wave Addon detected — aborting early.");
   QOL_ABORTED = true;
@@ -10847,6 +10941,10 @@ style.textContent = `
     background:#1e2235;
     border-color:#303a60;
     color:#cdd4ff;
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    background-image: none; /* optional if theme adds one */
   }
 
 @media (max-width: 640px) {
@@ -11380,7 +11478,7 @@ if (msg.includes("already dead")) {
     function init(attempt = 0) {
 
   if (QOL_ABORTED) return;
-
+  if (QOL_INITIALIZED) return;
    const host = getWaveHostPanel();
 if (!host) {
   if (attempt < 30) return setTimeout(() => init(attempt + 1), 300);
@@ -11449,7 +11547,7 @@ if (!fNameSel || !qolTop || !selectActions || !qolAttacks) {
   if (attempt < 30) return setTimeout(() => init(attempt + 1), 300);
   return;
 }
-
+QOL_INITIALIZED = true;
 
     /* ===================== Disable Native Filters ===================== */
     ["fJoined", "fUnjoined", "fCapNotReached"].forEach(id => {
@@ -15325,7 +15423,74 @@ function findWrapper() {
 
 })();
 
+//merchant buy max btn
 
+(function () {
+    'use strict';
+
+    function addBuyMaxButtons() {
+        document.querySelectorAll('.card').forEach(card => {
+            // prevent duplicates
+            if (card.querySelector('.buy-max-btn')) return;
+
+            const actions = card.querySelector('.actions');
+            const buyBtn = card.querySelector('.buy-btn');
+            const qtyInput = card.querySelector('.qty-input');
+
+            if (!actions || !buyBtn || buyBtn.disabled) return;
+
+            const maxq = parseInt(card.dataset.maxq || '0', 10);
+            const bought = parseInt(card.dataset.bought || '0', 10);
+            const remaining = Math.max(0, maxq - bought);
+
+            if (remaining <= 0) return;
+
+            // create button
+            const maxBtn = document.createElement('button');
+            maxBtn.className = 'btn buy-max-btn';
+            maxBtn.style.marginLeft = '6px';
+
+            // show remaining amount
+            maxBtn.textContent = remaining;
+
+            maxBtn.addEventListener('click', () => {
+                if (!qtyInput) return;
+
+                const maxqNow = parseInt(card.dataset.maxq || '0', 10);
+                const boughtNow = parseInt(card.dataset.bought || '0', 10);
+                const remainingNow = Math.max(0, maxqNow - boughtNow);
+
+                if (remainingNow <= 0) {
+                    maxBtn.remove();
+                    return;
+                }
+
+                // set quantity
+                qtyInput.value = remainingNow;
+
+                // trigger buy
+                buyBtn.click();
+
+                // ✅ remove button immediately after click
+                maxBtn.remove();
+                // (alternative: maxBtn.style.display = 'none';)
+            });
+
+            actions.appendChild(maxBtn);
+        });
+    }
+
+    // initial run
+    addBuyMaxButtons();
+
+    // observe dynamic updates
+    const observer = new MutationObserver(addBuyMaxButtons);
+    observer.observe(document.body, {
+        childList: true,
+        subtree: true
+    });
+
+})();
 
 
 
